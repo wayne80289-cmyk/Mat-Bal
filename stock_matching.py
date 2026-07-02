@@ -780,6 +780,57 @@ def material_row_matches_spec(mat_spec: str, m: pd.Series, rules: dict | None = 
     return False
 
 
+def parse_product_width_from_fg_code(fg_code: str, thickness: float | None = None) -> float | None:
+    """
+    Finished width from FG Code dimensions (when Material Code has no product width).
+    e.g. 1.6x61x1219 → 61, 0.7x580xC → 580
+    """
+    fg = _text(fg_code).replace(" ", "")
+    if not fg:
+        return None
+
+    m = re.match(r"^([\d.]+)[tT]?[xX]([\d.]+)(?:[xX](.+))?$", fg, re.I)
+    if not m:
+        return None
+
+    t_val = _num(m.group(1))
+    w_val = _num(m.group(2))
+    if thickness is not None and thickness > 0:
+        if round(t_val, 1) != round(thickness, 1):
+            return None
+    if w_val <= 0 or round(w_val, 0) == 1219:
+        return None
+    return w_val
+
+
+def resolve_product_width(m: pd.Series, thickness: float) -> float | None:
+    """
+    Resolve finished product width for coil-split from Material Code, FG Code, or RD004 Width.
+    Used when FG is dimension-based or Material Code omits finished width.
+    """
+    mat_code = _text(m.get("Material_Code", ""))
+
+    pw = parse_product_width_from_material_code(mat_code, thickness)
+    if pw is not None and pw > 0:
+        return pw
+
+    for fg_field in ("FG_Code",):
+        pw = parse_product_width_from_fg_code(m.get(fg_field, ""), thickness)
+        if pw is not None and pw > 0:
+            return pw
+
+    for fg in _text(m.get("FG_Codes_All", "")).split(","):
+        pw = parse_product_width_from_fg_code(fg.strip(), thickness)
+        if pw is not None and pw > 0:
+            return pw
+
+    rd_w = _num(m.get("Width"))
+    if rd_w > 0 and round(rd_w, 0) != 1219:
+        return rd_w
+
+    return None
+
+
 def parse_product_width_from_material_code(material_code: str, thickness: float | None = None) -> float | None:
     """
     Finished product width from Material Code.
@@ -820,9 +871,9 @@ def find_coil_split_targets(
 ) -> list[tuple[pd.Series, float]]:
     """
     Proportional split when:
-    - MS004/MP008 Mat Spec matches RD004 Material Code spec group
-    - Raw coil width != individual finished widths in codes
-    - Raw coil width > sum of multiple finished product widths
+    - MS004/MP008 Mat Spec matches RD004 spec group (even if FG Code is non-dimensional in Material Code)
+    - Finished widths resolved from FG Code dimensions and/or RD004 Width field
+    - Raw coil width > sum of multiple finished product widths (at least 2)
     Weight per code = (product_W / raw_coil_W) * coil weight
     """
     if raw_coil_width <= 0:
@@ -844,7 +895,7 @@ def find_coil_split_targets(
         if not mat_code or mat_code in seen_codes:
             continue
 
-        product_w = parse_product_width_from_material_code(mat_code, thickness)
+        product_w = resolve_product_width(m, thickness)
         if product_w is None or product_w <= 0:
             continue
         if round(product_w, 0) == round(raw_coil_width, 0):
