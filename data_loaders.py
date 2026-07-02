@@ -500,6 +500,7 @@ def load_client_forecast(target_months: list[str] | None = None) -> pd.DataFrame
 
 
 def load_order_history(sample_path: Path | None = None) -> pd.DataFrame:
+    """U7 fallback: Act order M-1/M-2/M-3 (kg) by FG_Code."""
     sample_path = sample_path or resolve_sample_path()
     act = pd.read_excel(sample_path, sheet_name="Act order", header=None)
     rows = []
@@ -523,6 +524,153 @@ def load_order_history(sample_path: Path | None = None) -> pd.DataFrame:
         "M-2": "sum",
         "M-3": "sum",
     })
+
+
+def _resolve_sa_sales_sheet(workbook: Path) -> str:
+    xl = pd.ExcelFile(workbook)
+    for name in xl.sheet_names:
+        if name.strip().upper() == "SA006":
+            return name
+    for name in xl.sheet_names:
+        if name.strip().upper() == "SA007":
+            return name
+    raise ValueError(f"No SA006/SA007 sheet in {workbook.name}")
+
+
+def _parse_sa007_sales(raw: pd.DataFrame, source: str) -> pd.DataFrame:
+    """Parse SA007 pivot: Weight cols for relative months 3–5 = last 3 months (kg)."""
+    hdr = 4
+    wt_cols = {3: 14, 4: 15, 5: 16}  # M-3, M-2, M-1 (oldest → newest)
+    rows = []
+    for i in range(hdr + 1, len(raw)):
+        fg = raw.iloc[i, 2]
+        if pd.isna(fg) or not _text(fg):
+            continue
+        m3 = _num(raw.iloc[i, wt_cols[3]])
+        m2 = _num(raw.iloc[i, wt_cols[4]])
+        m1 = _num(raw.iloc[i, wt_cols[5]])
+        if m1 + m2 + m3 <= 0:
+            continue
+        rows.append({
+            "Customer": _text(raw.iloc[i, 0]),
+            "Delivery_Place": _text(raw.iloc[i, 1]),
+            "FG_Code": _text(fg),
+            "Spec": _text(raw.iloc[i, 3]),
+            "Thickness": _num(raw.iloc[i, 4]),
+            "Width": _num(raw.iloc[i, 5]),
+            "M-3_kg": m3,
+            "M-2_kg": m2,
+            "M-1_kg": m1,
+            "Total_3mo_kg": m1 + m2 + m3,
+            "Source_Sheet": "SA007",
+            "Source_File": source,
+        })
+    return pd.DataFrame(rows)
+
+
+def _parse_sa006_sheet(raw: pd.DataFrame, source: str) -> pd.DataFrame:
+    """Parse SA006 when layout matches SA007 (Weight months 3–5)."""
+    return _parse_sa007_sales(raw, source).assign(Source_Sheet="SA006")
+
+
+def load_sa006_sales(sample_path: Path | None = None) -> pd.DataFrame:
+    """
+    Load last-3-month actual sales (kg) for plan universe.
+    Prefers SA006 sheet; falls back to SA007 (same layout in Sample Balance).
+    Carrier customers excluded.
+    """
+    sample_path = sample_path or resolve_sample_path()
+    sheet = _resolve_sa_sales_sheet(sample_path)
+    raw = pd.read_excel(sample_path, sheet_name=sheet, header=None)
+    if sheet.strip().upper() == "SA006":
+        df = _parse_sa006_sheet(raw, sample_path.name)
+    else:
+        df = _parse_sa007_sales(raw, sample_path.name)
+    return exclude_carrier_rows(df)
+
+
+def build_fg_to_material_map(rd004: pd.DataFrame) -> dict[str, str]:
+    fg_to_mat: dict[str, str] = {}
+    for _, m in rd004.iterrows():
+        fg_to_mat[_text(m["FG_Code"])] = _text(m["Material_Code"])
+        for fg in str(m.get("FG_Codes_All", "")).split(","):
+            if fg.strip():
+                fg_to_mat[fg.strip()] = _text(m["Material_Code"])
+    return fg_to_mat
+
+
+def aggregate_sa006_by_material(sa006_df: pd.DataFrame, rd004: pd.DataFrame) -> pd.DataFrame:
+    """Roll SA006/SA007 FG sales up to Material_Code with U-Stock matching fallback."""
+    from stock_matching import find_rd004_matches, load_matching_rules, resolve_customer_spec_pairing
+
+    if sa006_df.empty:
+        return pd.DataFrame(columns=[
+            "Material_Code", "FG_Code", "Main_Customer", "Customers",
+            "M-3_kg", "M-2_kg", "M-1_kg", "Total_3mo_kg", "Avg_Monthly_Ton", "Source_Sheet",
+        ])
+
+    rules = load_matching_rules()
+    fg_to_mat = build_fg_to_material_map(rd004)
+    df = sa006_df.copy()
+    mat_codes: list[str] = []
+    for _, row in df.iterrows():
+        fg = _text(row["FG_Code"])
+        code = fg_to_mat.get(fg, "")
+        if not code:
+            code = resolve_customer_spec_pairing(
+                row.get("Spec", ""),
+                row.get("Thickness", 0),
+                row.get("Width", 0),
+                rd004,
+                fg,
+                row.get("Customer", ""),
+            ) or ""
+        if not code:
+            hits = find_rd004_matches(
+                row.get("Spec", ""),
+                row.get("Thickness", 0),
+                row.get("Width", 0),
+                rd004,
+                rules,
+            )
+            if not hits.empty:
+                code = _text(hits.iloc[0]["Material_Code"])
+        if not code:
+            code = fg
+        mat_codes.append(code)
+    df["Material_Code"] = mat_codes
+    df = df[df["Material_Code"] != ""].copy()
+    if df.empty:
+        return pd.DataFrame(columns=[
+            "Material_Code", "FG_Code", "Main_Customer", "Customers",
+            "M-3_kg", "M-2_kg", "M-1_kg", "Total_3mo_kg", "Avg_Monthly_Ton", "Source_Sheet",
+        ])
+
+    main_cust = (
+        rd004.set_index("Material_Code")["Main_Customer"].to_dict()
+        if "Main_Customer" in rd004.columns
+        else {}
+    )
+    fg_primary = (
+        rd004.set_index("Material_Code")["FG_Code"].to_dict()
+        if "FG_Code" in rd004.columns
+        else {}
+    )
+
+    grouped = df.groupby("Material_Code", as_index=False).agg({
+        "M-3_kg": "sum",
+        "M-2_kg": "sum",
+        "M-1_kg": "sum",
+        "Total_3mo_kg": "sum",
+        "Customer": lambda s: ", ".join(sorted({c for c in s if c})[:5]),
+        "Source_Sheet": "first",
+    })
+    grouped.rename(columns={"Customer": "Customers"}, inplace=True)
+    grouped["FG_Code"] = grouped["Material_Code"].map(lambda m: fg_primary.get(m, m))
+    grouped["Main_Customer"] = grouped["Material_Code"].map(lambda m: main_cust.get(m, ""))
+    grouped["Avg_Monthly_Ton"] = (grouped["Total_3mo_kg"] / 3.0 / 1000.0).round(3)
+    grouped = grouped[grouped["Total_3mo_kg"] > 0].copy()
+    return grouped.sort_values("Total_3mo_kg", ascending=False).reset_index(drop=True)
 
 
 def attach_material_codes(df: pd.DataFrame, rd004: pd.DataFrame) -> pd.DataFrame:
@@ -550,6 +698,9 @@ def get_data_source_summary() -> dict[str, str]:
             f"{schedule.name} + Sample Balance + Froecast (Carrier excluded)"
             if schedule
             else "Sample Balance Forecast + Froecast (Carrier excluded)"
+        ),
+        "sa006_sales": (
+            f"{resolve_sample_path().name} (SA006/SA007 近3月銷售; Carrier excluded)"
         ),
         "stock_matching_rules": rules_path.name if rules_path.exists() else f"{rules_path.name} (embedded defaults)",
         "scope": "不含 Carrier 客戶（本系統僅分析其他客戶訂單）",
