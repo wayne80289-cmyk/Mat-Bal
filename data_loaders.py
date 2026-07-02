@@ -57,7 +57,10 @@ def discover_file(patterns: list[str], search_dirs: list[Path] | None = None) ->
 
 
 def resolve_sample_path() -> Path:
-    found = discover_file(["All Customer review*.xlsx", "*Customer review*.xlsx"], [SAMPLE_DIR])
+    found = discover_file(
+        ["All Customer review*.xlsx", "*Customer review*.xlsx"],
+        [SAMPLE_DIR, BASE_DIR],
+    )
     return found or SAMPLE_PATH
 
 
@@ -212,7 +215,7 @@ def load_so003(sample_path: Path | None = None) -> pd.DataFrame:
     """Prefer SO003-Carrier file in Sample Balance; fallback to workbook SO003 sheet."""
     carrier_path = discover_file(
         ["*SO003*Carrier*", "*SO003-Carrier*", "*SO003 Carrier*"],
-        [SAMPLE_DIR],
+        [SAMPLE_DIR, BASE_DIR],
     )
     if carrier_path:
         if carrier_path.suffix.lower() in (".xlsx", ".xls"):
@@ -228,17 +231,25 @@ def load_so003(sample_path: Path | None = None) -> pd.DataFrame:
     return _parse_so003_raw(raw, source=sample_path.name)
 
 
+def _resolve_mp008_sheet(workbook: Path) -> str:
+    xl = pd.ExcelFile(workbook)
+    for name in xl.sheet_names:
+        if name.strip().upper().startswith("MP008"):
+            return name
+    raise ValueError(f"No MP008 sheet found in {workbook.name}")
+
+
 def load_mp008(sample_path: Path | None = None) -> pd.DataFrame:
     """Load open PO from standalone MP008 export or Sample Balance workbook."""
-    mp008_path = discover_file(["*MP008*", "MP008*.xlsx", "MP008*.xls"], [SAMPLE_DIR, BASE_DIR])
+    mp008_path = discover_file(["MP008*.xlsx", "MP008*.xls"], [SAMPLE_DIR, BASE_DIR])
     if mp008_path and mp008_path.suffix.lower() in (".xlsx", ".xls"):
-        xl = pd.ExcelFile(mp008_path)
-        sheet = next((s for s in xl.sheet_names if "MP008" in s.upper()), xl.sheet_names[0])
+        sheet = _resolve_mp008_sheet(mp008_path)
         raw = pd.read_excel(mp008_path, sheet_name=sheet, header=None)
         return _parse_mp008_raw(raw, source=mp008_path.name)
 
     sample_path = sample_path or resolve_sample_path()
-    raw = pd.read_excel(sample_path, sheet_name="MP008 xxxxxxxx", header=None)
+    sheet = _resolve_mp008_sheet(sample_path)
+    raw = pd.read_excel(sample_path, sheet_name=sheet, header=None)
     return _parse_mp008_raw(raw, source=sample_path.name)
 
 
@@ -501,7 +512,10 @@ def get_data_source_summary() -> dict[str, str]:
         "sample_balance": str(resolve_sample_path().name),
         "so003": carrier.name if carrier else f"{resolve_sample_path().name} (SO003 sheet)",
         "ms004": resolve_stock_path().name,
-        "mp008": (discover_file(["*MP008*"], [SAMPLE_DIR]) or resolve_sample_path()).name,
+        "mp008": (
+            discover_file(["MP008*.xlsx", "MP008*.xls"], [SAMPLE_DIR, BASE_DIR])
+            or resolve_sample_path()
+        ).name,
         "forecast": schedule.name if schedule else "Sample Balance Forecast + Froecast",
         "stock_matching_rules": rules_path.name if rules_path.exists() else f"{rules_path.name} (embedded defaults)",
     }
