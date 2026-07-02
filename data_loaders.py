@@ -176,7 +176,10 @@ def load_rd004_master(sample_path: Path | None = None) -> pd.DataFrame:
             "Main_Customer": _text(bal.iloc[i, 4]),
             "MOQ": 0.0,
         })
-    return pd.DataFrame(records)
+    df = pd.DataFrame(records)
+    from stock_matching import supplement_rd004_pairing_materials
+
+    return supplement_rd004_pairing_materials(df)
 
 
 def load_ms004(stock_path: Path | None = None) -> pd.DataFrame:

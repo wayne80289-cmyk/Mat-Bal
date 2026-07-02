@@ -60,6 +60,36 @@ DEFAULT_SPEC_MAP: dict[str, str] = {
 
 DEFAULT_PROJECT_CUST_CODES = frozenset({"MING TAI", "MINGTAI"})
 
+# Customer + Mat Spec + raw coil width → single finished Material Code (no multi-size split)
+DEFAULT_CUSTOMER_SPEC_PAIRINGS: list[dict] = [
+    {
+        "mat_spec": "DC05",
+        "thickness": 0.7,
+        "raw_widths": (1165.0, 1105.0),
+        "customer_keys": ("SSK",),
+        "material_code": "DC05_0.7_580_C",
+        "product_width": 580.0,
+        "fg_code": "0.7x580xC",
+        "main_customer": "SSK KOLAKARN",
+        "spec": "DC05",
+        "common_group": "DC05",
+        "note": "SSK 原卷1165/1105僅配成品DC05 0.7x580",
+    },
+    {
+        "mat_spec": "DC05",
+        "thickness": 0.7,
+        "raw_widths": (1250.0,),
+        "customer_keys": ("THAISUMMITGOL", "THAISUMMIT"),
+        "material_code": "DC05_0.7_1250_BAO",
+        "product_width": 415.0,
+        "fg_code": "0.7x415x505",
+        "main_customer": "THAI SUMMIT GOL",
+        "spec": "DC05",
+        "common_group": "DC05",
+        "note": "Thai Summit GOL 原卷1250配0.7x415成品",
+    },
+]
+
 
 def _text(v) -> str:
     if v is None or (isinstance(v, float) and pd.isna(v)):
@@ -391,7 +421,138 @@ def spec_group_matches(stock_spec: str, rd004_spec: str, rules: dict | None = No
     return stock_key.startswith(target_key[:6]) or target_key.startswith(stock_key[:6])
 
 
+def customer_keys_match(customer: str, cust_code: str, keys: tuple[str, ...]) -> bool:
+    combined = _compact_spec(f"{customer} {cust_code}")
+    for key in keys:
+        k = _compact_spec(key)
+        if k and k in combined:
+            return True
+    return False
+
+
+def load_customer_spec_pairings(rules_path: Path | None = None) -> list[dict]:
+    """Load exclusive customer/spec pairings from rules workbook or defaults."""
+    pairings = [dict(p) for p in DEFAULT_CUSTOMER_SPEC_PAIRINGS]
+    rules_path = rules_path or resolve_rules_path()
+    if not rules_path.exists():
+        return pairings
+    try:
+        xl = pd.ExcelFile(rules_path)
+        sheet = next((s for s in xl.sheet_names if "客戶專屬" in s or "專屬配對" in s), None)
+        if not sheet:
+            return pairings
+        df = pd.read_excel(rules_path, sheet_name=sheet)
+        loaded: list[dict] = []
+        for _, row in df.iterrows():
+            spec = _text(row.get("Mat_Spec", row.get("MAT_SPEC", "")))
+            code = _text(row.get("Material_Code", ""))
+            if not spec or not code:
+                continue
+            raw_ws = row.get("原料寬度_W", row.get("Raw_Widths", ""))
+            if isinstance(raw_ws, str):
+                widths = tuple(_num(x) for x in re.split(r"[,;/\s]+", raw_ws) if _text(x))
+            elif isinstance(raw_ws, (list, tuple)):
+                widths = tuple(_num(x) for x in raw_ws)
+            else:
+                widths = (float(raw_ws),) if pd.notna(raw_ws) and _num(raw_ws) > 0 else ()
+            cust_keys = _text(row.get("客戶關鍵字", row.get("Customer_Keys", "")))
+            keys = tuple(k.strip() for k in re.split(r"[,;/]", cust_keys) if k.strip())
+            loaded.append({
+                "mat_spec": spec,
+                "thickness": _num(row.get("厚度_T", row.get("Thickness", 0))),
+                "raw_widths": widths,
+                "customer_keys": keys,
+                "material_code": code,
+                "product_width": _num(row.get("成品寬_W", row.get("Product_W", 0))),
+                "fg_code": _text(row.get("FG_Code", "")),
+                "main_customer": _text(row.get("Main_Customer", "")),
+                "spec": spec,
+                "common_group": _text(row.get("Common_Group", spec)),
+                "note": _text(row.get("備註", "")),
+            })
+        return loaded if loaded else pairings
+    except Exception:
+        return pairings
+
+
+def match_exclusive_customer_spec_pairing(
+    mat_spec: str,
+    thickness: float,
+    raw_width: float,
+    customer: str = "",
+    cust_code: str = "",
+    pairings: list[dict] | None = None,
+) -> dict | None:
+    """
+    Exclusive 1:1 pairing: e.g. SSK DC05 0.7x1165 → DC05_0.7_580_C only.
+    """
+    pairings = pairings or load_customer_spec_pairings()
+    for rule in pairings:
+        if _norm_spec(mat_spec) != _norm_spec(rule.get("mat_spec", "")):
+            continue
+        if not thickness_matches(thickness, _num(rule.get("thickness"))):
+            continue
+        raw_ws = rule.get("raw_widths") or ()
+        if raw_ws and not any(round(raw_width, 0) == round(rw, 0) for rw in raw_ws):
+            continue
+        if not customer_keys_match(customer, cust_code, tuple(rule.get("customer_keys", ()))):
+            continue
+        return rule
+    return None
+
+
 def customer_matches(a: str, b: str) -> bool:
+    a_c = _compact_spec(a)
+    b_c = _compact_spec(b)
+    if not a_c or not b_c:
+        return False
+    return a_c == b_c or a_c in b_c or b_c in a_c
+
+
+def supplement_rd004_pairing_materials(rd004: pd.DataFrame, pairings: list[dict] | None = None) -> pd.DataFrame:
+    """Add Material Codes from customer-spec pairing rules if missing from RD004."""
+    pairings = pairings or load_customer_spec_pairings()
+    if rd004.empty:
+        existing: set[str] = set()
+    else:
+        existing = set(rd004["Material_Code"].astype(str))
+    rows = []
+    for rule in pairings:
+        code = _text(rule.get("material_code", ""))
+        if not code or code in existing:
+            continue
+        pw = _num(rule.get("product_width"))
+        rows.append({
+            "Material_Code": code,
+            "Common_Group": rule.get("common_group", rule.get("spec", "")),
+            "Spec": rule.get("spec", ""),
+            "Thickness": _num(rule.get("thickness")),
+            "Width": pw if pw > 0 else 1219.0,
+            "FG_Code": rule.get("fg_code", code),
+            "FG_Codes_All": rule.get("fg_code", code),
+            "Kind": "CR",
+            "Main_Customer": rule.get("main_customer", ""),
+            "MOQ": 0.0,
+        })
+        existing.add(code)
+    if not rows:
+        return rd004
+    return pd.concat([rd004, pd.DataFrame(rows)], ignore_index=True)
+
+
+def pairing_blocks_coil_split(
+    mat_spec: str,
+    thickness: float,
+    raw_width: float,
+    customer: str = "",
+    cust_code: str = "",
+    pairings: list[dict] | None = None,
+) -> bool:
+    """If exclusive pairing applies, do not split across other finished widths."""
+    return match_exclusive_customer_spec_pairing(
+        mat_spec, thickness, raw_width, customer, cust_code, pairings
+    ) is not None
+
     a_c = _compact_spec(a)
     b_c = _compact_spec(b)
     if not a_c or not b_c:
@@ -487,6 +648,24 @@ def allocate_ms004_stock(ms004_df: pd.DataFrame, rd004: pd.DataFrame, rules: dic
         if qty_ton <= 0:
             continue
 
+        cust_code = _text(row.get("CUST CODE", row.get("Cust Code", "")))
+        exclusive = match_exclusive_customer_spec_pairing(spec, t, w, "", cust_code)
+        if exclusive:
+            records.append({
+                "Material_Code": exclusive["material_code"],
+                "Common_Group": exclusive.get("common_group", spec),
+                "Quantity": qty_ton,
+                "Mat_Spec": spec,
+                "T": t,
+                "W": w,
+                "CUST_CODE": cust_code,
+                "MAKER_CODE": _text(row.get("MAKER CODE", row.get("Maker Code", ""))),
+                "Allocatable": True,
+                "Match_Rule": "Customer-Spec-Pair",
+                "Product_W": exclusive.get("product_width"),
+            })
+            continue
+
         matches = find_rd004_matches(spec, t, w, rd004, rules)
         if not matches.empty:
             mat_code = _pick_material_for_stock(
@@ -510,7 +689,7 @@ def allocate_ms004_stock(ms004_df: pd.DataFrame, rd004: pd.DataFrame, rules: dic
                 })
             continue
 
-        split_targets = find_coil_split_targets(spec, t, w, rd004, rules)
+        split_targets = find_coil_split_targets(spec, t, w, rd004, rules, cust_code=cust_code)
         if split_targets:
             for m, product_w in split_targets:
                 ratio = product_w / w
@@ -636,6 +815,8 @@ def find_coil_split_targets(
     raw_coil_width: float,
     rd004: pd.DataFrame,
     rules: dict | None = None,
+    customer: str = "",
+    cust_code: str = "",
 ) -> list[tuple[pd.Series, float]]:
     """
     Proportional split when:
@@ -645,6 +826,8 @@ def find_coil_split_targets(
     Weight per code = (product_W / raw_coil_W) * coil weight
     """
     if raw_coil_width <= 0:
+        return []
+    if pairing_blocks_coil_split(mat_spec, thickness, raw_coil_width, customer, cust_code):
         return []
 
     rules = rules or load_matching_rules()
@@ -746,9 +929,20 @@ def allocate_mp008_inbound(
         if qty_ton <= 0:
             continue
 
+        po_customer = _text(row.get("Customer", ""))
+        exclusive = match_exclusive_customer_spec_pairing(spec, t, w, po_customer, "")
+        if exclusive:
+            rows.append(_mp008_alloc_row(
+                row,
+                exclusive["material_code"],
+                qty_ton,
+                "Customer-Spec-Pair",
+                Product_W=exclusive.get("product_width"),
+            ))
+            continue
+
         matches = find_rd004_matches(spec, t, w, rd004, rules)
         mat_code = _text(row.get("Material_Code", ""))
-        po_customer = _text(row.get("Customer", ""))
         priority = "Pre-matched"
 
         if not mat_code and not matches.empty:
@@ -768,7 +962,7 @@ def allocate_mp008_inbound(
             rows.append(_mp008_alloc_row(row, mat_code, qty_ton, priority))
             continue
 
-        split_targets = find_coil_split_targets(spec, t, w, rd004, rules)
+        split_targets = find_coil_split_targets(spec, t, w, rd004, rules, customer=po_customer)
         if split_targets:
             for m, product_w in split_targets:
                 ratio = product_w / w
