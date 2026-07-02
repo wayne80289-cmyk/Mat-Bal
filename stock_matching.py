@@ -487,6 +487,27 @@ def allocate_ms004_stock(ms004_df: pd.DataFrame, rd004: pd.DataFrame, rules: dic
         if qty_ton <= 0:
             continue
 
+        split_targets = find_coil_split_targets(spec, t, w, rd004, rules)
+        if split_targets:
+            for m, product_w in split_targets:
+                ratio = product_w / w
+                records.append({
+                    "Material_Code": m["Material_Code"],
+                    "Common_Group": m.get("Common_Group", m.get("Spec", "")),
+                    "Quantity": round(qty_ton * ratio, 6),
+                    "Mat_Spec": spec,
+                    "T": t,
+                    "W": w,
+                    "CUST_CODE": _text(row.get("CUST CODE", row.get("Cust Code", ""))),
+                    "MAKER_CODE": _text(row.get("MAKER CODE", row.get("Maker Code", ""))),
+                    "Allocatable": True,
+                    "Match_Rule": "Coil-Split",
+                    "Raw_Coil_W": w,
+                    "Product_W": product_w,
+                    "Split_Ratio": round(ratio, 6),
+                })
+            continue
+
         matches = find_rd004_matches(spec, t, w, rd004, rules)
         if matches.empty:
             continue
@@ -573,6 +594,85 @@ def _pick_material_for_stock(
     return candidates.iloc[0]["Material_Code"]
 
 
+def material_row_matches_spec(mat_spec: str, m: pd.Series, rules: dict | None = None) -> bool:
+    """Match MS004/MP008 spec against RD004 Spec, Common_Group, or Material_Code."""
+    rules = rules or load_matching_rules()
+    for field in ("Spec", "Common_Group", "Material_Code"):
+        val = _text(m.get(field, ""))
+        if val and spec_group_matches(mat_spec, val, rules):
+            return True
+    return False
+
+
+def parse_product_width_from_material_code(material_code: str, thickness: float | None = None) -> float | None:
+    """
+    Finished product width embedded in Material Code, e.g.
+    BUSDE+Z-CSG+0 0/50_1.0x440_____ → 440
+    """
+    code = _text(material_code)
+    best: float | None = None
+    for m in re.finditer(r"([\d.]+)[xX]([\d.]+)", code):
+        t_val = _num(m.group(1))
+        w_val = _num(m.group(2))
+        if w_val <= 0 or round(w_val, 0) == 1219:
+            continue
+        if thickness is not None and thickness > 0:
+            if round(t_val, 1) != round(thickness, 1):
+                continue
+        if best is None or w_val > 0:
+            best = w_val
+    return best
+
+
+def find_coil_split_targets(
+    mat_spec: str,
+    thickness: float,
+    raw_coil_width: float,
+    rd004: pd.DataFrame,
+    rules: dict | None = None,
+) -> list[tuple[pd.Series, float]]:
+    """
+    Raw coil width (e.g. 906) → finished Material Codes by product width in code.
+    Weight per code = (product_W / raw_coil_W) * coil weight.
+    """
+    if raw_coil_width <= 0 or round(raw_coil_width, 0) == 1219:
+        return []
+
+    rules = rules or load_matching_rules()
+    targets: list[tuple[pd.Series, float]] = []
+    for _, m in rd004.iterrows():
+        if not material_row_matches_spec(mat_spec, m, rules):
+            continue
+        if not thickness_matches(thickness, _num(m.get("Thickness"))):
+            continue
+        product_w = parse_product_width_from_material_code(m.get("Material_Code", ""), thickness)
+        if product_w is None or product_w <= 0 or product_w >= raw_coil_width:
+            continue
+        targets.append((m, product_w))
+
+    targets.sort(key=lambda x: x[1])
+    return targets
+
+
+def _mp008_alloc_row(row: pd.Series, mat_code: str, qty_ton: float, priority: str, **extra) -> dict:
+    base = {
+        "Po No.": _text(row.get("Po No.", "")),
+        "Customer": _text(row.get("Customer", "")),
+        "Mat Spec": _text(row.get("Mat Spec", "")),
+        "T": _num(row.get("T")),
+        "W": _num(row.get("W")),
+        "ETA": row.get("ETA"),
+        "ETA_Month": row.get("ETA_Month", ""),
+        "Material_Code": mat_code,
+        "Quantity": round(qty_ton, 6),
+        "Alloc_Priority": priority,
+        "Close Flag": row.get("Close Flag", False),
+        "PO Balance WT": _num(row.get("PO Balance WT", qty_ton * 1000)),
+    }
+    base.update(extra)
+    return base
+
+
 def _pick_material_for_po(candidates: pd.DataFrame, po_customer: str) -> str:
     """Customer-first allocation (same customer name), then Common pool."""
     if candidates.empty:
@@ -617,6 +717,21 @@ def allocate_mp008_inbound(
         if qty_ton <= 0:
             continue
 
+        split_targets = find_coil_split_targets(spec, t, w, rd004, rules)
+        if split_targets:
+            for m, product_w in split_targets:
+                ratio = product_w / w
+                rows.append(_mp008_alloc_row(
+                    row,
+                    m["Material_Code"],
+                    qty_ton * ratio,
+                    "Coil-Split",
+                    Raw_Coil_W=w,
+                    Product_W=product_w,
+                    Split_Ratio=round(ratio, 6),
+                ))
+            continue
+
         matches = find_rd004_matches(spec, t, w, rd004, rules)
         mat_code = _text(row.get("Material_Code", ""))
         po_customer = _text(row.get("Customer", ""))
@@ -639,20 +754,7 @@ def allocate_mp008_inbound(
         if not mat_code:
             continue
 
-        rows.append({
-            "Po No.": _text(row.get("Po No.", "")),
-            "Customer": _text(row.get("Customer", "")),
-            "Mat Spec": spec,
-            "T": t,
-            "W": w,
-            "ETA": row.get("ETA"),
-            "ETA_Month": row.get("ETA_Month", ""),
-            "Material_Code": mat_code,
-            "Quantity": qty_ton,
-            "Alloc_Priority": priority,
-            "Close Flag": row.get("Close Flag", False),
-            "PO Balance WT": _num(row.get("PO Balance WT", qty_ton * 1000)),
-        })
+        rows.append(_mp008_alloc_row(row, mat_code, qty_ton, priority))
 
     if not rows:
         return pd.DataFrame(columns=[
