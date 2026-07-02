@@ -332,6 +332,8 @@ def load_forecast(forecast_dir: Path) -> pd.DataFrame:
 
     frames = []
     for path in sorted(forecast_dir.glob("*.xlsx")):
+        if "CARRIER" in path.name.upper():
+            continue
         try:
             if "CPK" in path.name.upper():
                 part = parse_cpk_forecast(path)

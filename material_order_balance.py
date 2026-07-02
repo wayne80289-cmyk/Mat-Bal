@@ -316,6 +316,7 @@ def run_full_pipeline(target_months: list[str] | None = None) -> pd.DataFrame:
     target_months = target_months or TARGET_MONTHS
     sources = get_data_source_summary()
     print("=== Penta Thick 現貨/期貨整合計畫系統 ===")
+    print("分析範圍: 不含 Carrier 客戶（僅其他客戶訂單）")
     print("資料來源:")
     for k, v in sources.items():
         print(f"  {k}: {v}")

@@ -42,7 +42,41 @@ def _text(v) -> str:
     return re.sub(r"\s+", " ", str(v).strip())
 
 
-def discover_file(patterns: list[str], search_dirs: list[Path] | None = None) -> Path | None:
+def is_carrier_label(*values) -> bool:
+    """True when customer/cust/source text refers to Carrier (excluded from this engine)."""
+    for v in values:
+        t = _text(v).upper().replace(" ", "")
+        if t and "CARRIER" in t:
+            return True
+    return False
+
+
+def is_carrier_path(path: Path) -> bool:
+    return "CARRIER" in path.name.upper()
+
+
+def exclude_carrier_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """Drop rows tied to Carrier customers/sources."""
+    if df.empty:
+        return df
+    mask = pd.Series(False, index=df.index)
+    for col in df.columns:
+        key = str(col).upper().replace(" ", "").replace("_", "")
+        if key in ("CUSTOMER", "CUSTCODE", "CUST", "MAINCUSTOMER", "DELIVERYPLACE"):
+            mask |= df[col].map(lambda v: is_carrier_label(v))
+    if "Source" in df.columns:
+        mask |= df["Source"].map(lambda v: is_carrier_label(v))
+    if "Source_File" in df.columns:
+        mask |= df["Source_File"].map(lambda v: is_carrier_label(v))
+    return df.loc[~mask].copy()
+
+
+def discover_file(
+    patterns: list[str],
+    search_dirs: list[Path] | None = None,
+    *,
+    exclude_carrier: bool = True,
+) -> Path | None:
     """Return newest matching file across search directories."""
     search_dirs = search_dirs or [SAMPLE_DIR, FORECAST_DIR, BASE_DIR]
     matches: list[Path] = []
@@ -51,6 +85,8 @@ def discover_file(patterns: list[str], search_dirs: list[Path] | None = None) ->
             continue
         for pattern in patterns:
             matches.extend(directory.glob(pattern))
+    if exclude_carrier:
+        matches = [p for p in matches if not is_carrier_path(p)]
     if not matches:
         return None
     return max(matches, key=lambda p: p.stat().st_mtime)
@@ -60,6 +96,7 @@ def resolve_sample_path() -> Path:
     found = discover_file(
         ["All Customer review*.xlsx", "*Customer review*.xlsx"],
         [SAMPLE_DIR, BASE_DIR],
+        exclude_carrier=True,
     )
     return found or SAMPLE_PATH
 
@@ -177,6 +214,7 @@ def load_rd004_master(sample_path: Path | None = None) -> pd.DataFrame:
             "MOQ": 0.0,
         })
     df = pd.DataFrame(records)
+    df = df[~df["Main_Customer"].map(lambda v: is_carrier_label(v))]
     from stock_matching import supplement_rd004_pairing_materials
 
     return supplement_rd004_pairing_materials(df)
@@ -211,27 +249,14 @@ def load_ms004(stock_path: Path | None = None) -> pd.DataFrame:
     if maker_col:
         out["MAKER CODE"] = out[maker_col].map(_text)
     out["Source_File"] = stock_path.name
-    return out
+    return exclude_carrier_rows(out)
 
 
 def load_so003(sample_path: Path | None = None) -> pd.DataFrame:
-    """Prefer SO003-Carrier file in Sample Balance; fallback to workbook SO003 sheet."""
-    carrier_path = discover_file(
-        ["*SO003*Carrier*", "*SO003-Carrier*", "*SO003 Carrier*"],
-        [SAMPLE_DIR, BASE_DIR],
-    )
-    if carrier_path:
-        if carrier_path.suffix.lower() in (".xlsx", ".xls"):
-            xl = pd.ExcelFile(carrier_path)
-            sheet = next((s for s in xl.sheet_names if "SO003" in s.upper() or "CARRIER" in s.upper()), xl.sheet_names[0])
-            raw = pd.read_excel(carrier_path, sheet_name=sheet, header=None)
-            df = _parse_so003_raw(raw, source=carrier_path.name)
-            if not df.empty:
-                return df
-
+    """Load SO003 from Sample Balance workbook (Carrier sources excluded)."""
     sample_path = sample_path or resolve_sample_path()
     raw = pd.read_excel(sample_path, sheet_name="SO003", header=None)
-    return _parse_so003_raw(raw, source=sample_path.name)
+    return exclude_carrier_rows(_parse_so003_raw(raw, source=sample_path.name))
 
 
 def _resolve_mp008_sheet(workbook: Path) -> str:
@@ -248,12 +273,12 @@ def load_mp008(sample_path: Path | None = None) -> pd.DataFrame:
     if mp008_path and mp008_path.suffix.lower() in (".xlsx", ".xls"):
         sheet = _resolve_mp008_sheet(mp008_path)
         raw = pd.read_excel(mp008_path, sheet_name=sheet, header=None)
-        return _parse_mp008_raw(raw, source=mp008_path.name)
+        return exclude_carrier_rows(_parse_mp008_raw(raw, source=mp008_path.name))
 
     sample_path = sample_path or resolve_sample_path()
     sheet = _resolve_mp008_sheet(sample_path)
     raw = pd.read_excel(sample_path, sheet_name=sheet, header=None)
-    return _parse_mp008_raw(raw, source=sample_path.name)
+    return exclude_carrier_rows(_parse_mp008_raw(raw, source=sample_path.name))
 
 
 def _parse_mp008_raw(raw: pd.DataFrame, source: str) -> pd.DataFrame:
@@ -328,7 +353,9 @@ def load_sample_balance_forecast(sample_path: Path | None = None) -> pd.DataFram
         records.append(rec)
     if not records:
         return pd.DataFrame(columns=["Material_Code", *TARGET_MONTHS])
-    return pd.DataFrame(records).groupby("Material_Code", as_index=False).sum(numeric_only=True)
+    df = pd.DataFrame(records)
+    df = exclude_carrier_rows(df)
+    return df.groupby("Material_Code", as_index=False).sum(numeric_only=True)
 
 
 def load_penta_schedule_forecast() -> pd.DataFrame:
@@ -366,6 +393,7 @@ def load_penta_schedule_forecast() -> pd.DataFrame:
         return pd.DataFrame(columns=["Material_Code", *TARGET_MONTHS])
 
     combined = pd.concat(frames, ignore_index=True)
+    combined = exclude_carrier_rows(combined)
     month_cols = [m for m in TARGET_MONTHS if m in combined.columns]
     grouped = combined.groupby("Material_Code", as_index=False)[month_cols].sum()
     grouped["Forecast_Source"] = schedule_path.name if schedule_path else "Sample Balance + Froecast"
@@ -505,20 +533,24 @@ def attach_material_codes(df: pd.DataFrame, rd004: pd.DataFrame) -> pd.DataFrame
 
 
 def get_data_source_summary() -> dict[str, str]:
-    """Report which source files were resolved."""
+    """Report which source files were resolved (Carrier sources excluded)."""
     from stock_matching import resolve_rules_path
 
-    carrier = discover_file(["*SO003*Carrier*", "*SO003-Carrier*"], [SAMPLE_DIR])
     schedule = discover_file(["*PENTA*Schedule*wk*25*", "*Schedule*wk*25*"], [SAMPLE_DIR, FORECAST_DIR])
     rules_path = resolve_rules_path()
     return {
         "sample_balance": str(resolve_sample_path().name),
-        "so003": carrier.name if carrier else f"{resolve_sample_path().name} (SO003 sheet)",
-        "ms004": resolve_stock_path().name,
+        "so003": f"{resolve_sample_path().name} (SO003 sheet; Carrier excluded)",
+        "ms004": f"{resolve_stock_path().name} (Carrier excluded)",
         "mp008": (
-            discover_file(["MP008*.xlsx", "MP008*.xls"], [SAMPLE_DIR, BASE_DIR])
-            or resolve_sample_path()
-        ).name,
-        "forecast": schedule.name if schedule else "Sample Balance Forecast + Froecast",
+            f"{(discover_file(['MP008*.xlsx', 'MP008*.xls'], [SAMPLE_DIR, BASE_DIR]) or resolve_sample_path()).name}"
+            " (Carrier excluded)"
+        ),
+        "forecast": (
+            f"{schedule.name} + Sample Balance + Froecast (Carrier excluded)"
+            if schedule
+            else "Sample Balance Forecast + Froecast (Carrier excluded)"
+        ),
         "stock_matching_rules": rules_path.name if rules_path.exists() else f"{rules_path.name} (embedded defaults)",
+        "scope": "不含 Carrier 客戶（本系統僅分析其他客戶訂單）",
     }

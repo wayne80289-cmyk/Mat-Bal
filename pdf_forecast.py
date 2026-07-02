@@ -400,6 +400,8 @@ def parse_pdf_forecast(path: Path) -> pd.DataFrame:
 def load_pdf_forecasts(forecast_dir: Path) -> pd.DataFrame:
     frames = []
     for path in sorted(forecast_dir.glob("*.pdf")):
+        if "CARRIER" in path.name.upper():
+            continue
         try:
             part = parse_pdf_forecast(path)
             if not part.empty:
