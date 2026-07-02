@@ -101,6 +101,30 @@ DEFAULT_CUSTOMER_SPEC_PAIRINGS: list[dict] = [
         "common_group": "DC05",
         "note": "Thai Summit GOL 原卷1250配0.7x415成品",
     },
+    {
+        "mat_spec": "JSH270C-P/O",
+        "thickness": 0,
+        "raw_widths": (),
+        "customer_keys": ("THAISUMMITGOL", "TSGP"),
+        "target_spec_contains": "SPHC-P/O",
+        "material_code": "",
+        "main_customer": "THAI SUMMIT GOL",
+        "spec": "SPHC-P/O",
+        "common_group": "SPHC-P/O",
+        "note": "TSGP JSH270C-P/O 對應 FG/Material Code 內 SPHC-P/O",
+    },
+    {
+        "mat_spec": "JSH440W-P/O",
+        "thickness": 0,
+        "raw_widths": (),
+        "customer_keys": ("THAISUMMITGOL", "TSGP"),
+        "target_spec_contains": "SAPH440-P/O",
+        "material_code": "",
+        "main_customer": "THAI SUMMIT GOL",
+        "spec": "SAPH440-P/O",
+        "common_group": "SAPH440-P/O",
+        "note": "TSGP JSH440W-P/O 對應 SAPH440-P/O",
+    },
 ]
 
 
@@ -488,6 +512,61 @@ def load_customer_spec_pairings(rules_path: Path | None = None) -> list[dict]:
         return pairings
 
 
+def _row_matches_target_spec(m: pd.Series, target_spec: str, rules: dict | None = None) -> bool:
+    """True if RD004 row Material Code / Spec / FG_Code corresponds to target spec group."""
+    target = _norm_spec(target_spec)
+    if not target:
+        return False
+    tk = _compact_spec(target)
+    for field in ("Material_Code", "Spec", "Common_Group", "FG_Code"):
+        val = _text(m.get(field, ""))
+        if not val:
+            continue
+        if spec_group_matches(target, val, rules):
+            return True
+        if tk in _compact_spec(val):
+            return True
+    fg_all = _text(m.get("FG_Codes_All", ""))
+    if target.replace("-", "") in fg_all.upper().replace("-", ""):
+        return True
+    return False
+
+
+def resolve_cross_spec_material_code(
+    rule: dict,
+    thickness: float,
+    rd004: pd.DataFrame,
+    customer: str = "",
+    rules: dict | None = None,
+) -> str:
+    """Map inbound/source spec to a concrete Material_Code in RD004 by target spec group + T."""
+    target = _text(rule.get("target_spec_contains", ""))
+    if not target or rd004.empty:
+        return ""
+
+    hits: list[pd.Series] = []
+    for _, m in rd004.iterrows():
+        if not _row_matches_target_spec(m, target, rules):
+            continue
+        if not thickness_matches(thickness, _num(m.get("Thickness"))):
+            continue
+        hits.append(m)
+
+    if not hits:
+        return ""
+
+    for m in hits:
+        main_c = _text(m.get("Main_Customer", ""))
+        if customer_matches("TSGP", main_c) or customer_matches(customer, main_c):
+            return _text(m["Material_Code"])
+
+    common = [m for m in hits if is_common_material_code(m["Material_Code"])]
+    if common:
+        return _text(common[0]["Material_Code"])
+
+    return _text(hits[0]["Material_Code"])
+
+
 def match_exclusive_customer_spec_pairing(
     mat_spec: str,
     thickness: float,
@@ -496,14 +575,13 @@ def match_exclusive_customer_spec_pairing(
     cust_code: str = "",
     pairings: list[dict] | None = None,
 ) -> dict | None:
-    """
-    Exclusive 1:1 pairing: e.g. SSK DC05 0.7x1165 → DC05_0.7_580_C only.
-    """
+    """Match customer/spec pairing rule (fixed Material Code or cross-spec target)."""
     pairings = pairings or load_customer_spec_pairings()
     for rule in pairings:
         if _norm_spec(mat_spec) != _norm_spec(rule.get("mat_spec", "")):
             continue
-        if not thickness_matches(thickness, _num(rule.get("thickness"))):
+        rule_t = _num(rule.get("thickness"))
+        if rule_t > 0 and not thickness_matches(thickness, rule_t):
             continue
         raw_ws = rule.get("raw_widths") or ()
         if raw_ws and not any(round(raw_width, 0) == round(rw, 0) for rw in raw_ws):
@@ -512,6 +590,35 @@ def match_exclusive_customer_spec_pairing(
             continue
         return rule
     return None
+
+
+def resolve_customer_spec_pairing(
+    mat_spec: str,
+    thickness: float,
+    raw_width: float,
+    rd004: pd.DataFrame,
+    customer: str = "",
+    cust_code: str = "",
+    pairings: list[dict] | None = None,
+    rules: dict | None = None,
+) -> dict | None:
+    """Resolve pairing rule to a concrete Material_Code (fixed or cross-spec lookup)."""
+    rule = match_exclusive_customer_spec_pairing(
+        mat_spec, thickness, raw_width, customer, cust_code, pairings
+    )
+    if not rule:
+        return None
+
+    code = _text(rule.get("material_code", ""))
+    if not code:
+        code = resolve_cross_spec_material_code(rule, thickness, rd004, customer, rules)
+
+    if not code:
+        return None
+
+    out = dict(rule)
+    out["material_code"] = code
+    return out
 
 
 def customer_matches(a: str, b: str) -> bool:
@@ -662,7 +769,7 @@ def allocate_ms004_stock(ms004_df: pd.DataFrame, rd004: pd.DataFrame, rules: dic
             continue
 
         cust_code = _text(row.get("CUST CODE", row.get("Cust Code", "")))
-        exclusive = match_exclusive_customer_spec_pairing(spec, t, w, "", cust_code)
+        exclusive = resolve_customer_spec_pairing(spec, t, w, rd004, "", cust_code)
         if exclusive:
             records.append({
                 "Material_Code": exclusive["material_code"],
@@ -994,7 +1101,7 @@ def allocate_mp008_inbound(
             continue
 
         po_customer = _text(row.get("Customer", ""))
-        exclusive = match_exclusive_customer_spec_pairing(spec, t, w, po_customer, "")
+        exclusive = resolve_customer_spec_pairing(spec, t, w, rd004, po_customer, "")
         if exclusive:
             rows.append(_mp008_alloc_row(
                 row,
