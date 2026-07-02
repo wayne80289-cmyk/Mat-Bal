@@ -190,8 +190,20 @@ def load_ms004(stock_path: Path | None = None) -> pd.DataFrame:
     out["Spec"] = out[spec_col].map(_text)
     out["Thickness"] = pd.to_numeric(out["T"], errors="coerce")
     out["Width"] = pd.to_numeric(out["W"], errors="coerce")
-    wt_col = "REMAIN WT" if "REMAIN WT" in out.columns else "REMAIN WT"
-    out["Quantity"] = pd.to_numeric(out[wt_col], errors="coerce").fillna(0) / 1000.0
+    p_wt_col = next((c for c in out.columns if str(c).upper().replace("  ", " ") == "P REMAIN WT"), None)
+    rem_wt_col = next((c for c in out.columns if str(c).upper() == "REMAIN WT"), None)
+    if p_wt_col:
+        out["P REMAIN WT"] = pd.to_numeric(out[p_wt_col], errors="coerce").fillna(0)
+    if rem_wt_col:
+        out["REMAIN WT"] = pd.to_numeric(out[rem_wt_col], errors="coerce").fillna(0)
+    wt_kg = out["P REMAIN WT"] if "P REMAIN WT" in out.columns else out.get("REMAIN WT", 0)
+    out["Quantity"] = pd.to_numeric(wt_kg, errors="coerce").fillna(0) / 1000.0
+    cust_col = next((c for c in out.columns if str(c).upper().replace(" ", "") == "CUSTCODE"), None)
+    if cust_col:
+        out["CUST CODE"] = out[cust_col].map(_text)
+    maker_col = next((c for c in out.columns if str(c).upper().replace(" ", "") == "MAKERCODE"), None)
+    if maker_col:
+        out["MAKER CODE"] = out[maker_col].map(_text)
     out["Source_File"] = stock_path.name
     return out
 
@@ -265,6 +277,7 @@ def _parse_mp008_raw(raw: pd.DataFrame, source: str) -> pd.DataFrame:
         bal_wt = _num(raw.iloc[i, col_map.get("PO Balance WT", 24)])
         if bal_wt <= 0:
             continue
+        close_flag = raw.iloc[i, col_map["Close Flag"]] if "Close Flag" in col_map else False
         rows.append({
             "Po No.": _text(raw.iloc[i, col_map.get("Po No.", 0)]),
             "Customer": _text(raw.iloc[i, col_map.get("Customer", 4)]),
@@ -274,6 +287,7 @@ def _parse_mp008_raw(raw: pd.DataFrame, source: str) -> pd.DataFrame:
             "ETA": eta_dt,
             "ETA_Month": eta_dt.strftime("%Y-%m"),
             "PO Balance WT": bal_wt,
+            "Close Flag": close_flag,
             "Status": "Open",
             "Source": source,
         })
@@ -470,28 +484,10 @@ def load_order_history(sample_path: Path | None = None) -> pd.DataFrame:
 
 
 def attach_material_codes(df: pd.DataFrame, rd004: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
-        return df.assign(Material_Code=pd.Series(dtype=str))
+    """Assign Material_Code to open MP008 via U-Stock Mat Spec rules + customer priority."""
+    from stock_matching import allocate_mp008_inbound
 
-    def match_row(row):
-        spec = _text(row.get("Mat Spec", "")).upper()
-        t, w = _num(row.get("T")), _num(row.get("W"))
-        hits = rd004[
-            rd004["Spec"].str.upper().str.contains(spec[:6], na=False)
-            & (rd004["Thickness"].round(3) == round(t, 3))
-        ]
-        if w > 0 and w != 1219:
-            wmatch = hits[hits["Width"].round(0) == round(w, 0)]
-            if not wmatch.empty:
-                hits = wmatch
-        if hits.empty:
-            hits = rd004[rd004["Thickness"].round(3) == round(t, 3)]
-        return hits.iloc[0]["Material_Code"] if not hits.empty else ""
-
-    out = df.copy()
-    out["Material_Code"] = out.apply(match_row, axis=1)
-    out["Quantity"] = out["PO Balance WT"] / 1000.0
-    return out
+    return allocate_mp008_inbound(df, rd004)
 
 
 def get_data_source_summary() -> dict[str, str]:

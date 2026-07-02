@@ -14,7 +14,6 @@ from dateutil.relativedelta import relativedelta
 
 from data_loaders import (
     TARGET_MONTHS,
-    attach_material_codes,
     get_data_source_summary,
     load_client_forecast,
     load_mp008,
@@ -22,6 +21,11 @@ from data_loaders import (
     load_order_history,
     load_rd004_master,
     load_so003,
+)
+from stock_matching import (
+    allocate_ms004_stock,
+    allocate_mp008_inbound,
+    inbound_by_material_month,
 )
 
 OUTPUT_DIR = Path(__file__).resolve().parent / "Output"
@@ -87,37 +91,12 @@ class MaterialOrderBalanceSystem:
         return so_summary
 
     def clean_and_allocate_stock(self, ms004_raw_df, rd004_master_df):
-        cleaned_stock = []
-        for _, row in ms004_raw_df.iterrows():
-            spec = str(row.get("Spec", "")).strip().upper()
-            t = row.get("Thickness")
-            w = row.get("Width")
-            match = rd004_master_df[
-                (rd004_master_df["Spec"].str.upper().str.contains(spec[:6], na=False))
-                & (rd004_master_df["Thickness"].round(3) == round(float(t), 3))
-            ]
-            if w and float(w) != 1219:
-                wmatch = match[match["Width"].round(0) == round(float(w), 0)]
-                if not wmatch.empty:
-                    match = wmatch
-            for _, m in match.iterrows():
-                cleaned_stock.append({
-                    "Material_Code": m["Material_Code"],
-                    "Common_Group": m["Common_Group"],
-                    "Quantity": row["Quantity"],
-                })
-        if not cleaned_stock:
-            return pd.DataFrame(columns=["Material_Code", "Common_Group", "Quantity"])
-        return pd.DataFrame(cleaned_stock).groupby(
-            ["Material_Code", "Common_Group"], as_index=False
-        )["Quantity"].sum()
+        """U-Stock rules: PTT + spec/T/W match → allocatable Initial_Stock pool."""
+        return allocate_ms004_stock(ms004_raw_df, rd004_master_df)
 
-    def filter_on_way_po(self, mp008_raw_df):
-        if mp008_raw_df.empty:
-            return mp008_raw_df
-        if "Status" in mp008_raw_df.columns:
-            return mp008_raw_df[mp008_raw_df["Status"] != "Received"].copy()
-        return mp008_raw_df.copy()
+    def filter_on_way_po(self, mp008_raw_df, rd004_master_df):
+        """U4: Close Flag=False; Mat Spec match with customer-first allocation."""
+        return allocate_mp008_inbound(mp008_raw_df, rd004_master_df)
 
     def run_material_balance(
         self,
@@ -139,6 +118,20 @@ class MaterialOrderBalanceSystem:
                 if fg.strip():
                     fg_to_mat[fg.strip()] = m["Material_Code"]
 
+        inbound_pool = inbound_by_material_month(active_po_df)
+        inbound_customer_pool: dict[tuple[str, str], float] = {}
+        inbound_common_pool: dict[tuple[str, str], float] = {}
+        if not active_po_df.empty and "Alloc_Priority" in active_po_df.columns:
+            for _, prow in active_po_df.iterrows():
+                key = (str(prow["Material_Code"]).strip(), str(prow.get("ETA_Month", "")).strip())
+                if not key[0] or not key[1]:
+                    continue
+                qty = float(prow.get("Quantity", 0) or 0)
+                if prow.get("Alloc_Priority") == "Customer-Match":
+                    inbound_customer_pool[key] = inbound_customer_pool.get(key, 0.0) + qty
+                else:
+                    inbound_common_pool[key] = inbound_common_pool.get(key, 0.0) + qty
+
         for mat_code in all_materials:
             mat_info = rd004_master_df[rd004_master_df["Material_Code"] == mat_code].iloc[0]
             fg_code_mapped = mat_info["FG_Code"]
@@ -153,6 +146,7 @@ class MaterialOrderBalanceSystem:
                 "FG_Code": fg_code_mapped,
                 "Main_Customer": mat_info.get("Main_Customer", ""),
                 "Initial_Stock_Ton": round(current_stock_qty, 3),
+                "Initial_Stock_Allocatable": round(current_stock_qty, 3),
             }
 
             for month_str in target_months:
@@ -172,10 +166,14 @@ class MaterialOrderBalanceSystem:
                 so_balance = so_data["Bal_Ton"]
                 effective_demand = max(forecast_demand, so_delivery + so_balance) - so_delivery
 
-                inbound = active_po_df[
-                    (active_po_df["Material_Code"] == mat_code)
-                    & (active_po_df["ETA_Month"] == month_str)
-                ]["Quantity"].sum()
+                inbound = inbound_pool.get((mat_code, month_str), 0.0)
+                if inbound == 0.0 and not active_po_df.empty:
+                    inbound = active_po_df[
+                        (active_po_df["Material_Code"] == mat_code)
+                        & (active_po_df["ETA_Month"] == month_str)
+                    ]["Quantity"].sum()
+                inbound_customer = inbound_customer_pool.get((mat_code, month_str), 0.0)
+                inbound_common = inbound_common_pool.get((mat_code, month_str), 0.0)
 
                 available_balance = available_balance + inbound - effective_demand
 
@@ -183,6 +181,8 @@ class MaterialOrderBalanceSystem:
                 mat_timeline[f"{month_str}_SO_Delivered"] = round(so_delivery, 3)
                 mat_timeline[f"{month_str}_SO_Balance(欠交)"] = round(so_balance, 3)
                 mat_timeline[f"{month_str}_Inbound_PO"] = round(inbound, 3)
+                mat_timeline[f"{month_str}_Inbound_PO_同客戶"] = round(inbound_customer, 3)
+                mat_timeline[f"{month_str}_Inbound_PO_共通池"] = round(inbound_common, 3)
                 mat_timeline[f"{month_str}_Effective_Demand"] = round(effective_demand, 3)
                 mat_timeline[f"{month_str}_Final_Balance"] = round(available_balance, 3)
 
@@ -321,7 +321,6 @@ def run_full_pipeline(target_months: list[str] | None = None) -> pd.DataFrame:
     ms004 = load_ms004()
     so003 = load_so003()
     mp008_raw = load_mp008()
-    mp008 = attach_material_codes(mp008_raw, rd004)
     order_history = load_order_history()
     client_forecast = load_client_forecast(target_months)
 
@@ -329,13 +328,15 @@ def run_full_pipeline(target_months: list[str] | None = None) -> pd.DataFrame:
     print(f"\n  RD004 materials: {len(rd004)}")
     print(f"  MS004 PTT stock rows: {len(ms004)}")
     print(f"  SO003 order rows: {len(so003)}")
-    print(f"  Open PO rows: {len(mp008)}")
-    print(f"  Forecast materials: {len(client_forecast)}")
-
     forecast_map = engine.integrate_sales_forecast(client_forecast, order_history, target_months)
     so_summary = engine.process_so003_orders(so003)
     cleaned_stock = engine.clean_and_allocate_stock(ms004, rd004)
-    active_po = engine.filter_on_way_po(mp008)
+    active_po = engine.filter_on_way_po(mp008_raw, rd004)
+    mp008 = active_po
+
+    print(f"  Open PO rows (allocatable): {len(active_po)}")
+    print(f"  Allocatable stock materials: {len(cleaned_stock)}")
+    print(f"  Forecast materials: {len(client_forecast)}")
 
     result = engine.run_material_balance(
         cleaned_stock, active_po, forecast_map, so_summary, rd004, target_months
@@ -358,7 +359,7 @@ def run_full_pipeline(target_months: list[str] | None = None) -> pd.DataFrame:
         shortage.to_excel(writer, sheet_name="Order Required", index=False)
         so003.to_excel(writer, sheet_name="SO003_Source", index=False)
         mp008.to_excel(writer, sheet_name="MP008_OnWay", index=False)
-        cleaned_stock.to_excel(writer, sheet_name="MS004_Stock", index=False)
+        cleaned_stock.to_excel(writer, sheet_name="MS004_Allocatable_Stock", index=False)
         client_forecast.to_excel(writer, sheet_name="Forecast_Source", index=False)
         source_rows.to_excel(writer, sheet_name="Data Sources", index=False)
         rd004.to_excel(writer, sheet_name="Material Master", index=False)
