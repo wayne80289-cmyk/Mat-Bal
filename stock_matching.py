@@ -9,7 +9,17 @@ from pathlib import Path
 import pandas as pd
 
 BASE_DIR = Path(__file__).resolve().parent
-RULES_PATH = BASE_DIR / "History Balance" / "Stock-Material-Code-Matching-Rules.xlsx"
+RULES_CANDIDATES = [
+    BASE_DIR / "History Balance" / "Stock-Material-Code-Matching-Rules.xlsx",
+    BASE_DIR / "Stock-Material-Code-Matching-Rules.xlsx",
+]
+
+
+def resolve_rules_path() -> Path:
+    for path in RULES_CANDIDATES:
+        if path.exists():
+            return path
+    return RULES_CANDIDATES[0]
 
 # Embedded defaults when rules workbook is absent (from export_matching_rules_excel.py)
 DEFAULT_SPEC_MAP: dict[str, str] = {
