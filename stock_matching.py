@@ -12,6 +12,7 @@ BASE_DIR = Path(__file__).resolve().parent
 RULES_CANDIDATES = [
     BASE_DIR / "History Balance" / "Stock-Material-Code-Matching-Rules.xlsx",
     BASE_DIR / "Stock-Material-Code-Matching-Rules.xlsx",
+    BASE_DIR / "stock-material-code-matching-rules.xlsx",
 ]
 
 
@@ -19,7 +20,26 @@ def resolve_rules_path() -> Path:
     for path in RULES_CANDIDATES:
         if path.exists():
             return path
+    search_dirs = [BASE_DIR, BASE_DIR / "History Balance"]
+    for directory in search_dirs:
+        if not directory.exists():
+            continue
+        for path in directory.iterdir():
+            if path.suffix.lower() != ".xlsx":
+                continue
+            name = path.name.lower()
+            if "stock" in name and "matching" in name and "rules" in name:
+                return path
     return RULES_CANDIDATES[0]
+
+
+RULES_REFERENCE_SHEETS = (
+    "配對規則清單",
+    "MAT SPEC對照",
+    "Code命名格式",
+    "排除情況",
+    "配對流程",
+)
 
 # Embedded defaults when rules workbook is absent (from export_matching_rules_excel.py)
 DEFAULT_SPEC_MAP: dict[str, str] = {
@@ -68,13 +88,40 @@ def _compact_spec(value: str) -> str:
     return re.sub(r"[^A-Z0-9]", "", _norm_spec(value))
 
 
-def load_matching_rules(rules_path: Path | None = None) -> dict:
-    """Load MAT SPEC map and exclusion rules from Stock-Material-Code-Matching-Rules.xlsx."""
-    rules_path = rules_path or RULES_PATH
-    spec_map = dict(DEFAULT_SPEC_MAP)
-    project_cust = set(DEFAULT_PROJECT_CUST_CODES)
+def _build_reverse_spec_index(spec_crosswalk: list[dict]) -> dict[str, list[dict]]:
+    """Code prefix → MS004 MAT SPEC rows from rules workbook."""
+    index: dict[str, list[dict]] = {}
+    for row in spec_crosswalk:
+        prefixes = re.split(r"\s*或\s*", _norm_spec(row.get("配對_Code前綴", "")))
+        for prefix in prefixes:
+            key = _compact_spec(prefix)
+            if key:
+                index.setdefault(key, []).append(row)
+    return index
 
-    if rules_path.exists():
+
+def _prefix_matches_group(prefix_compact: str, spec: str, common_group: str) -> bool:
+    for raw in (spec, common_group):
+        key = _compact_spec(raw)
+        if not key:
+            continue
+        if key == prefix_compact:
+            return True
+        if len(prefix_compact) >= 6 and len(key) >= 6:
+            if key.startswith(prefix_compact[:6]) or prefix_compact.startswith(key[:6]):
+                return True
+    return False
+
+
+def load_matching_rules(rules_path: Path | None = None) -> dict:
+    """Load rules from Stock-Material-Code-Matching-Rules.xlsx."""
+    rules_path = rules_path or resolve_rules_path()
+    spec_map = dict(DEFAULT_SPEC_MAP)
+    spec_crosswalk: list[dict] = []
+    project_cust = set(DEFAULT_PROJECT_CUST_CODES)
+    rules_path_exists = rules_path.exists()
+
+    if rules_path_exists:
         try:
             xl = pd.ExcelFile(rules_path)
             if "MAT SPEC對照" in xl.sheet_names:
@@ -82,12 +129,230 @@ def load_matching_rules(rules_path: Path | None = None) -> dict:
                 for _, row in df.iterrows():
                     ms = _norm_spec(row.get("MS004_MAT_SPEC", ""))
                     code = _norm_spec(row.get("配對_Code前綴", ""))
+                    note = _text(row.get("備註", ""))
                     if ms and code:
                         spec_map[ms] = code.split(" 或 ")[0].strip()
+                        spec_crosswalk.append({
+                            "MS004_MAT_SPEC": ms,
+                            "配對_Code前綴": code,
+                            "備註": note,
+                        })
+            if "排除情況" in xl.sheet_names:
+                excl = pd.read_excel(rules_path, sheet_name="排除情況")
+                for _, row in excl.iterrows():
+                    situation = _text(row.get("情況", ""))
+                    m = re.search(r"如\s+([A-Z0-9 /]+)", situation, re.I)
+                    if m:
+                        for token in re.split(r"[/、,]", m.group(1)):
+                            token = _norm_spec(token)
+                            if token:
+                                project_cust.add(token)
         except Exception:
             pass
 
-    return {"spec_map": spec_map, "project_cust_codes": project_cust}
+    if not spec_crosswalk:
+        spec_crosswalk = [
+            {"MS004_MAT_SPEC": k, "配對_Code前綴": v, "備註": ""}
+            for k, v in DEFAULT_SPEC_MAP.items()
+        ]
+
+    return {
+        "spec_map": spec_map,
+        "spec_crosswalk": spec_crosswalk,
+        "reverse_spec_index": _build_reverse_spec_index(spec_crosswalk),
+        "project_cust_codes": project_cust,
+        "rules_path": rules_path,
+        "rules_path_exists": rules_path_exists,
+    }
+
+
+def load_rules_workbook_sheets(rules_path: Path | None = None) -> dict[str, pd.DataFrame]:
+    """Load reference sheets from matching rules workbook for report export."""
+    rules_path = rules_path or resolve_rules_path()
+    sheets: dict[str, pd.DataFrame] = {}
+    if not rules_path.exists():
+        return sheets
+    try:
+        xl = pd.ExcelFile(rules_path)
+        for name in RULES_REFERENCE_SHEETS:
+            if name in xl.sheet_names:
+                sheets[name] = pd.read_excel(rules_path, sheet_name=name)
+    except Exception:
+        pass
+    return sheets
+
+
+def parse_material_code_parts(material_code: str) -> dict:
+    """Parse Code命名格式 A/B from Material_Code string."""
+    code = _text(material_code)
+    if not code:
+        return {
+            "Code_Format": "",
+            "Code_Suffix": "",
+            "Parsed_Common_Group": "",
+            "Parsed_T": None,
+            "Parsed_W": None,
+        }
+
+    fmt_b = re.match(r"^(.+)_([\d.]+)_([\d.]+)_0_(.+)$", code, re.I)
+    if fmt_b:
+        return {
+            "Code_Format": "格式B",
+            "Code_Suffix": _text(fmt_b.group(4)),
+            "Parsed_Common_Group": _text(fmt_b.group(1)),
+            "Parsed_T": _num(fmt_b.group(2)),
+            "Parsed_W": _num(fmt_b.group(3)),
+        }
+
+    fmt_a = re.match(r"^(.+)_([\d.]+)_([\d.]+)_(.+)$", code, re.I)
+    if fmt_a:
+        return {
+            "Code_Format": "格式A",
+            "Code_Suffix": _text(fmt_a.group(4)),
+            "Parsed_Common_Group": _text(fmt_a.group(1)),
+            "Parsed_T": _num(fmt_a.group(2)),
+            "Parsed_W": _num(fmt_a.group(3)),
+        }
+
+    return {
+        "Code_Format": "其他",
+        "Code_Suffix": "",
+        "Parsed_Common_Group": code,
+        "Parsed_T": None,
+        "Parsed_W": None,
+    }
+
+
+def classify_pool_type(code_suffix: str) -> tuple[str, str]:
+    """Return (Pool_Type, Stock_Rule_Ref) from code tail."""
+    suffix = _norm_spec(code_suffix).upper().replace(" ", "")
+    if suffix == "COMMON" or suffix.endswith("COMMON"):
+        return "共通池", "U-Stock-05"
+    if "CASH" in suffix:
+        return "現金採購", "U-Stock-07"
+    if suffix:
+        return "Maker", "U-Stock-06"
+    return "其他", "U-Stock-03"
+
+
+def ms004_specs_for_material(spec: str, common_group: str, rules: dict) -> tuple[str, str]:
+    """MS004 MAT SPECs and notes that map to this material group."""
+    hits: list[str] = []
+    notes: list[str] = []
+    for prefix, rows in rules.get("reverse_spec_index", {}).items():
+        if not _prefix_matches_group(prefix, spec, common_group):
+            continue
+        for row in rows:
+            ms = row.get("MS004_MAT_SPEC", "")
+            if ms:
+                hits.append(ms)
+            note = row.get("備註", "")
+            if note:
+                notes.append(note)
+    return ", ".join(sorted(set(hits))), "; ".join(sorted(set(notes)))
+
+
+def width_match_policy(width: float) -> str:
+    if round(width, 0) == 1219:
+        return "1219群組忽略寬度 (U-Stock-09)"
+    return "精確比對寬度"
+
+
+def mp008_alloc_hint(pool_type: str, main_customer: str) -> str:
+    if pool_type == "共通池":
+        return "MP008共通池調撥"
+    if main_customer:
+        return "MP008同客戶優先"
+    return "MP008規格配對"
+
+
+def enrich_material_master(
+    rd004_df: pd.DataFrame,
+    rules: dict | None = None,
+    allocatable_stock: pd.DataFrame | None = None,
+    allocated_po: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """
+    Merge RD004 master with Stock-Material-Code-Matching-Rules fields
+    and current-run allocatable stock / inbound totals.
+    """
+    if rd004_df.empty:
+        return rd004_df
+
+    rules = rules or load_matching_rules()
+    out = rd004_df.copy()
+
+    stock_map: dict[str, float] = {}
+    if allocatable_stock is not None and not allocatable_stock.empty:
+        stock_map = (
+            allocatable_stock.groupby("Material_Code")["Quantity"]
+            .sum()
+            .round(3)
+            .to_dict()
+        )
+
+    po_total_map: dict[str, float] = {}
+    po_customer_map: dict[str, float] = {}
+    if allocated_po is not None and not allocated_po.empty:
+        for _, row in allocated_po.iterrows():
+            mat = _text(row.get("Material_Code", ""))
+            if not mat:
+                continue
+            qty = _num(row.get("Quantity", 0))
+            po_total_map[mat] = po_total_map.get(mat, 0.0) + qty
+            if row.get("Alloc_Priority") == "Customer-Match":
+                po_customer_map[mat] = po_customer_map.get(mat, 0.0) + qty
+
+    rules_file = rules["rules_path"].name if rules.get("rules_path_exists") else "(embedded defaults)"
+
+    enriched_rows = []
+    for _, row in out.iterrows():
+        rec = row.to_dict()
+        code = _text(rec.get("Material_Code", ""))
+        spec = _text(rec.get("Spec", rec.get("Common_Group", "")))
+        common_group = _text(rec.get("Common_Group", spec))
+        t = _num(rec.get("Thickness"))
+        w = _num(rec.get("Width")) or 1219.0
+        main_customer = _text(rec.get("Main_Customer", ""))
+
+        parts = parse_material_code_parts(code)
+        pool_type, suffix_rule = classify_pool_type(parts["Code_Suffix"])
+        ms004_specs, ms004_notes = ms004_specs_for_material(spec, common_group, rules)
+
+        rule_refs = ["U-Stock-02", "U-Stock-03", "U-Stock-08", suffix_rule, "U-Stock-12"]
+        if pool_type == "共通池":
+            rule_refs.append("U-Stock-09")
+
+        rec.update({
+            "Rules_Source": rules_file,
+            "Code_Format": parts["Code_Format"],
+            "Code_Suffix": parts["Code_Suffix"],
+            "Pool_Type": pool_type,
+            "Match_Key": f"{common_group}|{round(t, 1):g}|{round(w, 0):.0f}",
+            "MS004_MAT_SPECS": ms004_specs,
+            "MS004_SPEC_備註": ms004_notes,
+            "Width_Match_Policy": width_match_policy(w),
+            "Thickness_Tolerance": "round(T,1)",
+            "Stock_Rule_Refs": ";".join(dict.fromkeys(rule_refs)),
+            "MP008_Alloc_Hint": mp008_alloc_hint(pool_type, main_customer),
+            "Allocatable_Stock_Ton": round(stock_map.get(code, 0.0), 3),
+            "Inbound_PO_Total_Ton": round(po_total_map.get(code, 0.0), 3),
+            "Inbound_PO_同客戶_Ton": round(po_customer_map.get(code, 0.0), 3),
+        })
+        enriched_rows.append(rec)
+
+    master = pd.DataFrame(enriched_rows)
+
+    # Column order: RD004 base fields first, then rules integration
+    base_cols = [c for c in rd004_df.columns if c in master.columns]
+    rule_cols = [
+        "Rules_Source", "Code_Format", "Code_Suffix", "Pool_Type", "Match_Key",
+        "MS004_MAT_SPECS", "MS004_SPEC_備註", "Width_Match_Policy", "Thickness_Tolerance",
+        "Stock_Rule_Refs", "MP008_Alloc_Hint",
+        "Allocatable_Stock_Ton", "Inbound_PO_Total_Ton", "Inbound_PO_同客戶_Ton",
+    ]
+    tail_cols = [c for c in master.columns if c not in base_cols and c not in rule_cols]
+    return master[base_cols + rule_cols + tail_cols]
 
 
 def map_ms004_spec(mat_spec: str, rules: dict | None = None) -> str:

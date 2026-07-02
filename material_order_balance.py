@@ -25,7 +25,10 @@ from data_loaders import (
 from stock_matching import (
     allocate_ms004_stock,
     allocate_mp008_inbound,
+    enrich_material_master,
     inbound_by_material_month,
+    load_rules_workbook_sheets,
+    resolve_rules_path,
 )
 
 OUTPUT_DIR = Path(__file__).resolve().parent / "Output"
@@ -345,6 +348,13 @@ def run_full_pipeline(target_months: list[str] | None = None) -> pd.DataFrame:
     spot_plan = build_spot_urgent_plan(result, so003, rd004, target_months)
     future_plan = build_futures_stocking_plan(result, rd004, target_months)
 
+    material_master = enrich_material_master(
+        rd004,
+        allocatable_stock=cleaned_stock,
+        allocated_po=active_po,
+    )
+    rules_sheets = load_rules_workbook_sheets()
+
     OUTPUT_DIR.mkdir(exist_ok=True)
     ts = datetime.datetime.now().strftime("%d.%m.%Y_%H%M")
     out_path = OUTPUT_DIR / f"Supply Plan {ts}.xlsx"
@@ -362,12 +372,16 @@ def run_full_pipeline(target_months: list[str] | None = None) -> pd.DataFrame:
         cleaned_stock.to_excel(writer, sheet_name="MS004_Allocatable_Stock", index=False)
         client_forecast.to_excel(writer, sheet_name="Forecast_Source", index=False)
         source_rows.to_excel(writer, sheet_name="Data Sources", index=False)
-        rd004.to_excel(writer, sheet_name="Material Master", index=False)
+        material_master.to_excel(writer, sheet_name="Material Master", index=False)
+        for sheet_name, sheet_df in rules_sheets.items():
+            safe = f"Rules_{sheet_name}"[:31]
+            sheet_df.to_excel(writer, sheet_name=safe, index=False)
 
     print(f"\nReport saved: {out_path}")
     print(f"  Balance materials: {len(result)}")
     print(f"  現貨緊急調貨: {len(spot_plan)} 項")
     print(f"  期貨備貨計畫: {len(future_plan)} 項")
+    print(f"  Material Master (rules: {resolve_rules_path().name}): {len(material_master)} 項")
     return result
 
 

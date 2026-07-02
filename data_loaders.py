@@ -492,12 +492,16 @@ def attach_material_codes(df: pd.DataFrame, rd004: pd.DataFrame) -> pd.DataFrame
 
 def get_data_source_summary() -> dict[str, str]:
     """Report which source files were resolved."""
+    from stock_matching import resolve_rules_path
+
     carrier = discover_file(["*SO003*Carrier*", "*SO003-Carrier*"], [SAMPLE_DIR])
     schedule = discover_file(["*PENTA*Schedule*wk*25*", "*Schedule*wk*25*"], [SAMPLE_DIR, FORECAST_DIR])
+    rules_path = resolve_rules_path()
     return {
         "sample_balance": str(resolve_sample_path().name),
         "so003": carrier.name if carrier else f"{resolve_sample_path().name} (SO003 sheet)",
         "ms004": resolve_stock_path().name,
         "mp008": (discover_file(["*MP008*"], [SAMPLE_DIR]) or resolve_sample_path()).name,
         "forecast": schedule.name if schedule else "Sample Balance Forecast + Froecast",
+        "stock_matching_rules": rules_path.name if rules_path.exists() else f"{rules_path.name} (embedded defaults)",
     }
