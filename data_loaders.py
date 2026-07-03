@@ -11,6 +11,7 @@ import pandas as pd
 
 BASE_DIR = Path(__file__).resolve().parent
 SAMPLE_DIR = BASE_DIR / "Sample Balance"
+HISTORY_BALANCE_DIR = BASE_DIR / "History Balance"
 STOCK_DIR = BASE_DIR / "Stock"
 SA007_DIR = BASE_DIR / "SA007"
 SA007_HISTORY_LABEL = "SA007歷史銷售紀錄"
@@ -23,6 +24,8 @@ FORECAST_DIR = BASE_DIR / "Forecast"
 FORECAST_DIR_LEGACY = BASE_DIR / "Froecast"
 # U1: Forecast/ 僅含「有提供預估表」的客戶，非全部客戶總需求
 FORECAST_SCOPE_LABEL = "有提供預估表之客戶（非全部客戶需求）"
+# History Balance / Sample Balance：僅報告樣本取樣參考，不作 Supply Plan 運行資料來源
+TEMPLATE_REFERENCE_LABEL = "僅報告樣本取樣參考（非運行資料來源）"
 OUTPUT_DIR = BASE_DIR / "Output"
 
 SAMPLE_PATH = SAMPLE_DIR / "All Customer review Jun '2026 review 20.06.2026.xlsx"
@@ -1212,7 +1215,7 @@ def attach_material_codes(df: pd.DataFrame, rd004: pd.DataFrame) -> pd.DataFrame
 
 
 def get_data_source_summary() -> dict[str, str]:
-    """Report which source files were resolved (Carrier sources excluded)."""
+    """Report Mat Bal folder sources used by Supply Plan (Carrier excluded)."""
     from stock_matching import resolve_rules_path
 
     rules_path = resolve_rules_path()
@@ -1221,32 +1224,35 @@ def get_data_source_summary() -> dict[str, str]:
     so003_paths = resolve_so003_paths()
     mp008_paths = resolve_mp008_paths()
     fc_dir = resolve_forecast_dir()
-    sa007_label = ", ".join(p.name for p in sa007_paths) if sa007_paths else f"{SA007_DIR.name}/ (empty → Sample Balance fallback)"
-    so003_label = ", ".join(p.name for p in so003_paths) if so003_paths else f"{SO003_DIR.name}/ (empty → Sample Balance fallback)"
-    mp008_label = ", ".join(p.name for p in mp008_paths) if mp008_paths else f"{MP008_DIR.name}/ (empty → Sample Balance fallback)"
+
+    def _folder_files(label: str, folder: Path, paths: list[Path]) -> str:
+        if paths:
+            return f"{label}/: " + ", ".join(p.name for p in paths)
+        return f"{label}/: (empty — 請放入匯出檔)"
+
     rd004_master_label = (
-        rd004_master.name
+        f"RD004/{rd004_master.name}"
         if rd004_master
-        else f"{RD004_DIR.name}/ (empty → Sample Balance fallback)"
+        else "RD004/: (empty — 請放入 Material Master 匯出檔)"
     )
     rules_label = (
-        f"{RD004_DIR.name}/{rules_path.name}"
+        f"RD004/{rules_path.name}"
         if rules_path.exists() and rules_path.parent.resolve() == RD004_DIR.resolve()
-        else (rules_path.name if rules_path.exists() else f"{rules_path.name} (embedded defaults)")
+        else (rules_path.name if rules_path.exists() else "內建 U-Stock 預設規則")
     )
     return {
-        "sample_balance": str(resolve_sample_path().name),
-        "rd004_master": f"{rd004_master_label} (Material Master; Carrier excluded)",
-        "rd004_pairing_rules": f"{rules_label} (配對規則/流程/MAT SPEC對照)",
+        "資料根目錄": f"Mat Bal/ — 各資料夾檔案為 Supply Plan 分析主來源",
+        "SA007": f"{_folder_files('SA007', SA007_DIR, sa007_paths)} ({SA007_HISTORY_LABEL})",
+        "Forecast": f"{fc_dir.name}/ ({FORECAST_SCOPE_LABEL})",
+        "SO003": _folder_files("SO003", SO003_DIR, so003_paths),
+        "MP008": _folder_files("MP008", MP008_DIR, mp008_paths),
+        "RD004": f"{rd004_master_label} + {rules_label}",
+        "Stock": f"Stock/{resolve_stock_path().name}",
+        "樣本參考": f"History Balance/、Sample Balance/ — {TEMPLATE_REFERENCE_LABEL}",
         "rd004_diff": (
             "RD004_差異摘要 / RD004_差異_主檔 / RD004_差異_配對規則"
             if rd004_master
             else "N/A (RD004/ 為空)"
         ),
-        "so003": f"{so003_label} (Carrier excluded)",
-        "ms004": f"{resolve_stock_path().name} (Carrier excluded)",
-        "mp008": f"{mp008_label} (Carrier excluded)",
-        "forecast": f"{fc_dir.name}/ ({FORECAST_SCOPE_LABEL}; Carrier excluded)",
-        "sa007_sales": f"{sa007_label} ({SA007_HISTORY_LABEL}; Carrier excluded)",
         "scope": "不含 Carrier 客戶（本系統僅分析其他客戶訂單）",
     }

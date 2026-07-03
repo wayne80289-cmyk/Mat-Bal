@@ -13,7 +13,6 @@ RD004_DIR = BASE_DIR / "RD004"
 RULES_CANDIDATES = [
     RD004_DIR / "Stock-Material-Code-Matching-Rules.xlsx",
     BASE_DIR / "Stock-Material-Code-Matching-Rules.xlsx",
-    BASE_DIR / "History Balance" / "Stock-Material-Code-Matching-Rules.xlsx",
     BASE_DIR / "stock-material-code-matching-rules.xlsx",
 ]
 
@@ -26,7 +25,7 @@ def resolve_rules_path() -> Path:
     for path in RULES_CANDIDATES:
         if path.exists():
             return path
-    search_dirs = [RD004_DIR, BASE_DIR, BASE_DIR / "History Balance"]
+    search_dirs = [RD004_DIR, BASE_DIR]
     for directory in search_dirs:
         if not directory.exists():
             continue
@@ -46,7 +45,7 @@ def resolve_baseline_rules_path() -> Path | None:
             continue
         if path.exists():
             return path
-    for directory in [BASE_DIR, BASE_DIR / "History Balance"]:
+    for directory in [BASE_DIR]:
         if not directory.exists():
             continue
         for path in directory.iterdir():

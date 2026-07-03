@@ -394,9 +394,11 @@ def build_futures_stocking_plan(
 def run_full_pipeline(target_months: list[str] | None = None) -> pd.DataFrame:
     target_months = target_months or TARGET_MONTHS
     sources = get_data_source_summary()
-    print("=== Penta Thick 現貨/期貨整合計畫系統 ===")
+    print("=== Penta Thick 現貨/期貨整合計畫系統 (Supply Plan) ===")
     print("分析範圍: 不含 Carrier 客戶（僅其他客戶訂單）")
-    print("需求資料: Forecast/ 有提供預估表之客戶 + SA007/ 歷史平均（其餘客戶 U7）")
+    print("資料來源: Mat Bal/ 各資料夾（SA007、Forecast、SO003、MP008、RD004、Stock）")
+    print("需求估算: Forecast/ 有提供預估表之客戶 + SA007/ 歷史平均（其餘客戶 U7）")
+    print("樣本參考: History Balance/、Sample Balance/ 僅報告樣本取樣，非運行資料來源")
     print("資料來源:")
     for k, v in sources.items():
         print(f"  {k}: {v}")
@@ -482,7 +484,7 @@ def run_full_pipeline(target_months: list[str] | None = None) -> pd.DataFrame:
     from data_loaders import resolve_rd004_master_path
 
     rd004_src = resolve_rd004_master_path()
-    rd004_name = rd004_src.name if rd004_src else "Sample Balance fallback"
+    rd004_name = rd004_src.name if rd004_src else "RD004/ (empty)"
     print(
         f"  Material Master ({rd004_name}; rules: {resolve_rules_path().name}): "
         f"{len(material_master)} 項, Rules sheets: {len(rules_sheets)}"
@@ -502,6 +504,6 @@ if __name__ == "__main__":
     ]
     show = [c for c in cols if c in df.columns]
     print("\n" + "=" * 90)
-    print("Sample Balance output:")
+    print("Balance 摘要 (前 10 項):")
     print(df[show].head(10).to_string(index=False))
     print("=" * 90)

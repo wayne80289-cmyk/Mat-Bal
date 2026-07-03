@@ -12,6 +12,7 @@ from data_loaders import (
     BASE_RD004_COLUMNS,
     RD004_DIR,
     SA007_HISTORY_LABEL,
+    TEMPLATE_REFERENCE_LABEL,
     _load_rd004_from_folder,
     _load_rd004_from_sample_balance,
     _text,
@@ -36,7 +37,7 @@ def rd004_folder_active() -> bool:
 
 
 def load_baseline_material_master(sample_path: Path | None = None) -> pd.DataFrame:
-    """Original Material Master from Sample Balance (pre-RD004 folder)."""
+    """樣本參考基準（Sample Balance）；僅供 RD004 差異比對，非 Supply Plan 運行來源。"""
     sample_path = sample_path or resolve_sample_path()
     df = _load_rd004_from_sample_balance(sample_path)
     if df.empty:
@@ -259,8 +260,8 @@ def list_rd004_folder_files() -> list[Path]:
 
 def build_rd004_diff_report() -> dict[str, pd.DataFrame]:
     """
-    When RD004/ has files, compare against baseline Sample Balance master
-    and original Stock-Material-Code-Matching-Rules (outside RD004/).
+    When RD004/ has files, compare against template sample baseline
+    (Sample Balance export layout). History Balance/ is template-only.
     """
     if not rd004_folder_active():
         return {}
@@ -280,7 +281,7 @@ def build_rd004_diff_report() -> dict[str, pd.DataFrame]:
     summary_rows = [
         {
             "項目": "RD004 資料夾",
-            "基準_原本": f"Sample Balance Balance sheet + {SA007_HISTORY_LABEL}（fallback）",
+            "基準_原本": f"樣本參考 Sample Balance（{TEMPLATE_REFERENCE_LABEL}）",
             "RD004": str(RD004_DIR),
         },
         {
