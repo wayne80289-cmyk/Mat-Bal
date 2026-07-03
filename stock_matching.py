@@ -127,6 +127,59 @@ DEFAULT_CUSTOMER_SPEC_PAIRINGS: list[dict] = [
     },
 ]
 
+# Exclusive mother-coil → finished product splits (rolls × width ratio).
+# Weight per Material = coil_weight × (product_W / raw_W) × rolls
+DEFAULT_EXCLUSIVE_COIL_SPLITS: list[dict] = [
+    {
+        "mat_spec": "BUSDE+Z-CSG+0 0/50",
+        "thickness": 1.0,
+        "raw_width": 926.0,
+        "note": "1.0x926xC → 1.0x460×2卷",
+        "splits": [
+            {
+                "product_width": 460.0,
+                "rolls": 2,
+                "material_code": "BUSDE+Z-CSG+0 0/50_1.0x460_____",
+                "fg_code": "50026363",
+            },
+        ],
+    },
+    {
+        "mat_spec": "BUSDE+Z-CSG+0 0/50",
+        "thickness": 1.0,
+        "raw_width": 1326.0,
+        "note": "1.0x1326xC → 1.0x440×3C",
+        "splits": [
+            {
+                "product_width": 440.0,
+                "rolls": 3,
+                "material_code": "BUSDE+Z-CSG+0 0/50_1.0x440_____",
+                "fg_code": "50025836",
+            },
+        ],
+    },
+    {
+        "mat_spec": "BUSDE+Z-CSG+0 0/50",
+        "thickness": 1.0,
+        "raw_width": 906.0,
+        "note": "1.0x906xC → 1.0x440×1卷 + 1.0x460×1卷",
+        "splits": [
+            {
+                "product_width": 440.0,
+                "rolls": 1,
+                "material_code": "BUSDE+Z-CSG+0 0/50_1.0x440_____",
+                "fg_code": "50025836",
+            },
+            {
+                "product_width": 460.0,
+                "rolls": 1,
+                "material_code": "BUSDE+Z-CSG+0 0/50_1.0x460_____",
+                "fg_code": "50026363",
+            },
+        ],
+    },
+]
+
 
 def _text(v) -> str:
     if v is None or (isinstance(v, float) and pd.isna(v)):
@@ -465,6 +518,111 @@ def customer_keys_match(customer: str, cust_code: str, keys: tuple[str, ...]) ->
         if k and k in combined:
             return True
     return False
+
+
+def load_exclusive_coil_splits(rules_path: Path | None = None) -> list[dict]:
+    """Load fixed mother-coil split rules (BUSDE+Z etc.)."""
+    return [dict(r) for r in DEFAULT_EXCLUSIVE_COIL_SPLITS]
+
+
+def _matches_coil_rule_spec(mat_spec: str, rule_spec: str) -> bool:
+    a = _compact_spec(mat_spec)
+    b = _compact_spec(rule_spec)
+    if not a or not b:
+        return False
+    if a == b or b in a or a in b:
+        return True
+    return a.startswith("BUSDEZ") and b.startswith("BUSDEZ")
+
+
+def match_exclusive_coil_split(
+    mat_spec: str,
+    thickness: float,
+    raw_width: float,
+    splits: list[dict] | None = None,
+) -> dict | None:
+    """Return exclusive coil split rule for spec/T/raw_W if defined."""
+    splits = splits or load_exclusive_coil_splits()
+    for rule in splits:
+        if not _matches_coil_rule_spec(mat_spec, rule.get("mat_spec", "")):
+            continue
+        rule_t = _num(rule.get("thickness"))
+        if rule_t > 0 and not thickness_matches(thickness, rule_t):
+            continue
+        if round(_num(rule.get("raw_width")), 0) != round(raw_width, 0):
+            continue
+        return rule
+    return None
+
+
+def find_exclusive_coil_split_targets(
+    mat_spec: str,
+    thickness: float,
+    raw_coil_width: float,
+    rd004: pd.DataFrame,
+    splits: list[dict] | None = None,
+) -> list[tuple[pd.Series, float, int]]:
+    """
+    Fixed coil splits with roll count.
+    Returns (rd004_row, product_width, rolls).
+    """
+    rule = match_exclusive_coil_split(mat_spec, thickness, raw_coil_width, splits)
+    if not rule:
+        return []
+
+    targets: list[tuple[pd.Series, float, int]] = []
+    for split in rule.get("splits", []):
+        code = _text(split.get("material_code", ""))
+        if not code:
+            continue
+        hit = rd004[rd004["Material_Code"].astype(str) == code]
+        if hit.empty:
+            pw = _num(split.get("product_width"))
+            hit = rd004[rd004["Width"].map(lambda w: round(_num(w), 0) == round(pw, 0))]
+            if not hit.empty:
+                hit = hit[hit["Material_Code"].astype(str).str.contains("BUSDE", case=False, na=False)]
+        if hit.empty:
+            continue
+        rolls = max(int(_num(split.get("rolls", 1))), 1)
+        targets.append((hit.iloc[0], _num(split.get("product_width")), rolls))
+    return targets
+
+
+def _append_coil_split_records(
+    records: list[dict],
+    row: pd.Series,
+    spec: str,
+    t: float,
+    w: float,
+    qty_ton: float,
+    split_targets: list[tuple[pd.Series, float, int]],
+    *,
+    match_rule: str,
+    cust_code: str = "",
+    maker_code: str = "",
+    extra_fields: dict | None = None,
+) -> None:
+    for m, product_w, rolls in split_targets:
+        ratio = (product_w / w) * rolls if w > 0 else 0.0
+        rec = {
+            "Material_Code": m["Material_Code"],
+            "Common_Group": m.get("Common_Group", m.get("Spec", "")),
+            "Quantity": round(qty_ton * ratio, 6),
+            "Mat_Spec": spec,
+            "T": t,
+            "W": w,
+            "CUST_CODE": cust_code,
+            "MAKER_CODE": maker_code,
+            "Allocatable": True,
+            "Match_Rule": match_rule,
+            "Raw_Coil_W": w,
+            "Product_W": product_w,
+            "Rolls": rolls,
+            "Split_Ratio": round(ratio, 6),
+        }
+        if extra_fields:
+            rec.update(extra_fields)
+        records.append(rec)
 
 
 def load_customer_spec_pairings(rules_path: Path | None = None) -> list[dict]:
@@ -811,23 +969,23 @@ def allocate_ms004_stock(ms004_df: pd.DataFrame, rd004: pd.DataFrame, rules: dic
 
         split_targets = find_coil_split_targets(spec, t, w, rd004, rules, cust_code=cust_code)
         if split_targets:
-            for m, product_w in split_targets:
-                ratio = product_w / w
-                records.append({
-                    "Material_Code": m["Material_Code"],
-                    "Common_Group": m.get("Common_Group", m.get("Spec", "")),
-                    "Quantity": round(qty_ton * ratio, 6),
-                    "Mat_Spec": spec,
-                    "T": t,
-                    "W": w,
-                    "CUST_CODE": _text(row.get("CUST CODE", row.get("Cust Code", ""))),
-                    "MAKER_CODE": _text(row.get("MAKER CODE", row.get("Maker Code", ""))),
-                    "Allocatable": True,
-                    "Match_Rule": "Coil-Split",
-                    "Raw_Coil_W": w,
-                    "Product_W": product_w,
-                    "Split_Ratio": round(ratio, 6),
-                })
+            split_rule = (
+                "Coil-Split-Exclusive"
+                if match_exclusive_coil_split(spec, t, w)
+                else "Coil-Split"
+            )
+            _append_coil_split_records(
+                records,
+                row,
+                spec,
+                t,
+                w,
+                qty_ton,
+                split_targets,
+                match_rule=split_rule,
+                cust_code=_text(row.get("CUST CODE", row.get("Cust Code", ""))),
+                maker_code=_text(row.get("MAKER CODE", row.get("Maker Code", ""))),
+            )
             continue
 
     if not records:
@@ -988,21 +1146,24 @@ def find_coil_split_targets(
     rules: dict | None = None,
     customer: str = "",
     cust_code: str = "",
-) -> list[tuple[pd.Series, float]]:
+) -> list[tuple[pd.Series, float, int]]:
     """
-    Proportional split when:
-    - MS004/MP008 Mat Spec matches RD004 spec group (even if FG Code is non-dimensional in Material Code)
-    - Finished widths resolved from FG Code dimensions and/or RD004 Width field
-    - Raw coil width > sum of multiple finished product widths (at least 2)
-    Weight per code = (product_W / raw_coil_W) * coil weight
+    Mother-coil split allocations.
+    Exclusive rules (BUSDE+Z fixed W×rolls) take priority over generic proportional split.
+    Returns (rd004_row, product_width, rolls); weight = coil_wt × (product_W/raw_W) × rolls.
     """
     if raw_coil_width <= 0:
         return []
+
+    exclusive = find_exclusive_coil_split_targets(mat_spec, thickness, raw_coil_width, rd004)
+    if exclusive:
+        return exclusive
+
     if pairing_blocks_coil_split(mat_spec, thickness, raw_coil_width, customer, cust_code):
         return []
 
     rules = rules or load_matching_rules()
-    targets: list[tuple[pd.Series, float]] = []
+    targets: list[tuple[pd.Series, float, int]] = []
     seen_codes: set[str] = set()
 
     for _, m in rd004.iterrows():
@@ -1024,12 +1185,12 @@ def find_coil_split_targets(
             continue
 
         seen_codes.add(mat_code)
-        targets.append((m, product_w))
+        targets.append((m, product_w, 1))
 
     if len(targets) < 2:
         return []
 
-    sum_product_w = sum(pw for _, pw in targets)
+    sum_product_w = sum(pw for _, pw, _ in targets)
     if raw_coil_width <= sum_product_w:
         return []
 
@@ -1135,17 +1296,23 @@ def allocate_mp008_inbound(
 
         split_targets = find_coil_split_targets(spec, t, w, rd004, rules, customer=po_customer)
         if split_targets:
-            for m, product_w in split_targets:
-                ratio = product_w / w
+            split_rule = (
+                "Coil-Split-Exclusive"
+                if match_exclusive_coil_split(spec, t, w)
+                else "Coil-Split"
+            )
+            for m, product_w, rolls in split_targets:
+                ratio = (product_w / w) * rolls if w > 0 else 0.0
                 rows.append(_mp008_alloc_row(
                     row,
                     m["Material_Code"],
                     qty_ton * ratio,
-                    "Coil-Split",
+                    split_rule,
                     Raw_Coil_W=w,
                     Product_W=product_w,
+                    Rolls=rolls,
                     Split_Ratio=round(ratio, 6),
-                    Product_W_Sum=sum(pw for _, pw in split_targets),
+                    Product_W_Sum=sum(pw * r for _, pw, r in split_targets),
                 ))
             continue
 
