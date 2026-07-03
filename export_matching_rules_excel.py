@@ -18,7 +18,7 @@ def write_sheets(writer: pd.ExcelWriter) -> None:
     pd.DataFrame([
         {"項目": "文件名稱", "內容": "Stock Material Code 配對庫存規則清單"},
         {"項目": "分析來源", "內容": "RD004/ Material Master 與 Stock-Material-Code-Matching-Rules"},
-        {"項目": "對照工作表", "內容": "Balance sheet (Update)、Act order、Original material code（01月）"},
+        {"項目": "對照工作表", "內容": "Balance sheet (Update)、SA007歷史銷售紀錄（SA007/）、Original material code（01月）"},
         {"項目": "產出日期", "內容": datetime.now().strftime("%Y-%m-%d %H:%M")},
         {"項目": "用途", "內容": "供檢查 MS004 庫存配對 Material Code 之業務規則"},
     ]).to_excel(writer, sheet_name="說明", index=False)
@@ -60,7 +60,7 @@ def write_sheets(writer: pd.ExcelWriter) -> None:
     # Sheet 5: 配對規則主表
     rules = [
         ("U-Stock-01", "OWNER 篩選", "必要", "僅 OWNER=PTT 納入配對與 Balance；非 PTT 不填 Code、不計平衡"),
-        ("U-Stock-02", "主檔 RD004", "必要", "Material Code 來自 RD004（Act order + Balance sheet）；一 Code 對一 Common Group"),
+        ("U-Stock-02", "主檔 RD004", "必要", "Material Code 來自 RD004（SA007歷史銷售紀錄 + Balance sheet）；一 Code 對一 Common Group"),
         ("U-Stock-03", "配對主鍵", "必要", "1.Common Group 2.厚度T 3.寬度W；MS004 無原生 Code，需 allocate 貼上"),
         ("U-Stock-04", "MAT SPEC 跨規格", "對照", "實際 MAT SPEC 可與 Code 前綴不同，同 RD004 群組即可（見 MAT SPEC對照表）"),
         ("U-Stock-05", "尾碼 _Common", "尾碼", "跨客戶共通備貨池；同 Code 多列加總進 Balance"),

@@ -13,6 +13,9 @@ BASE_DIR = Path(__file__).resolve().parent
 SAMPLE_DIR = BASE_DIR / "Sample Balance"
 STOCK_DIR = BASE_DIR / "Stock"
 SA007_DIR = BASE_DIR / "SA007"
+SA007_HISTORY_LABEL = "SA007歷史銷售紀錄"
+# Legacy Sample Balance workbook sheet name (fallback when SA007/ is empty)
+SAMPLE_BALANCE_SA007_SHEET = "Act order"
 SO003_DIR = BASE_DIR / "SO003"
 MP008_DIR = BASE_DIR / "MP008"
 RD004_DIR = BASE_DIR / "RD004"
@@ -410,14 +413,14 @@ def _load_rd004_from_folder() -> pd.DataFrame:
 
 
 def _load_rd004_from_sample_balance(sample_path: Path) -> pd.DataFrame:
-    """Legacy: build RD004 from Sample Balance Balance sheet + Act order."""
+    """Legacy: build RD004 from Sample Balance Balance sheet + SA007歷史銷售紀錄（Sample Balance fallback）。"""
     bal = pd.read_excel(sample_path, sheet_name="Balance sheet (Update)", header=None)
-    act = pd.read_excel(sample_path, sheet_name="Act order", header=None)
+    sa007_legacy = pd.read_excel(sample_path, sheet_name=SAMPLE_BALANCE_SA007_SHEET, header=None)
     forecast_fg_map = _load_forecast_fg_map(sample_path)
 
     fg_map: dict[str, set[str]] = {}
     spec_map: dict[str, dict] = {}
-    for _, row in act.iloc[4:].iterrows():
+    for _, row in sa007_legacy.iloc[4:].iterrows():
         code = row[0]
         if pd.isna(code):
             continue
@@ -804,26 +807,26 @@ def load_client_forecast(target_months: list[str] | None = None) -> pd.DataFrame
 
 
 def _detect_sa007_workbook_format(raw: pd.DataFrame) -> str:
-    """act_order = Material Code monthly layout; pivot = Customer/FG weight pivot."""
+    """material_code_layout = SA007歷史銷售紀錄 Material Code 月欄位；pivot = Customer/FG weight pivot。"""
     for ri in (2, 4):
         if ri >= len(raw):
             continue
         line = " ".join(_text(v).lower() for v in raw.iloc[ri].tolist()[:10])
         if "material code" in line:
-            return "act_order"
+            return "material_code_layout"
         if "customer" in line and "fg code" in line:
             return "pivot"
-    return "act_order"
+    return "material_code_layout"
 
 
-def _parse_sa007_act_order_style(
+def _parse_sa007_history_sales_style(
     raw: pd.DataFrame,
     source_file: str,
-    source_sheet: str = "SA007",
+    source_sheet: str = SA007_HISTORY_LABEL,
 ) -> pd.DataFrame:
     """
-    Act-order style actual sales (Material Code + FG + monthly kg).
-    Used by SA007/ folder exports; replaces Sample Balance Act order sheet.
+    SA007歷史銷售紀錄格式（Material Code + FG + 近三月 kg）。
+    資料來源：SA007/ 資料夾；Sample Balance 工作表僅 fallback。
     """
     rows = []
     for i in range(4, len(raw)):
@@ -844,7 +847,7 @@ def _parse_sa007_act_order_style(
             "M-3": _num(row[23]) if len(row) > 23 else 0.0,
             "Source_File": source_file,
             "Source_Sheet": source_sheet,
-            "Source_Format": "act_order",
+            "Source_Format": "sa007_history",
         })
     return pd.DataFrame(rows)
 
@@ -861,11 +864,11 @@ def _read_sa007_workbook(path: Path) -> pd.DataFrame:
     fmt = _detect_sa007_workbook_format(raw)
     if fmt == "pivot":
         return _parse_sa007_sales(raw, path.name)
-    return _parse_sa007_act_order_style(raw, path.name, sheet)
+    return _parse_sa007_history_sales_style(raw, path.name, SA007_HISTORY_LABEL)
 
 
 def _load_sa007_from_sample_fallback() -> pd.DataFrame:
-    """Fallback when SA007/ folder is empty: Sample Balance SA007 pivot or Act order."""
+    """Fallback when SA007/ folder is empty: Sample Balance SA007 pivot or SA007歷史銷售紀錄工作表。"""
     sample_path = resolve_sample_path()
     try:
         sheet = _resolve_sa_sales_sheet(sample_path)
@@ -876,14 +879,14 @@ def _load_sa007_from_sample_fallback() -> pd.DataFrame:
     except ValueError:
         pass
     try:
-        act = pd.read_excel(sample_path, sheet_name="Act order", header=None)
-        return _parse_sa007_act_order_style(act, sample_path.name, "Act order")
+        sa007_legacy = pd.read_excel(sample_path, sheet_name=SAMPLE_BALANCE_SA007_SHEET, header=None)
+        return _parse_sa007_history_sales_style(sa007_legacy, sample_path.name, SA007_HISTORY_LABEL)
     except Exception:
         return pd.DataFrame()
 
 
 def _normalize_sa007_sales_to_pivot(df: pd.DataFrame) -> pd.DataFrame:
-    """Unify act_order rows to pivot-style columns for aggregation."""
+    """Unify SA007歷史銷售紀錄列為 pivot 欄位以便彙總。"""
     if df.empty:
         return df
     if "M-3_kg" in df.columns:
@@ -907,14 +910,14 @@ def _normalize_sa007_sales_to_pivot(df: pd.DataFrame) -> pd.DataFrame:
             "M-2_kg": m2,
             "M-1_kg": m1,
             "Total_3mo_kg": m1 + m2 + m3,
-            "Source_Sheet": _text(row.get("Source_Sheet", "SA007")),
+            "Source_Sheet": _text(row.get("Source_Sheet", SA007_HISTORY_LABEL)),
             "Source_File": _text(row.get("Source_File")),
         })
     return pd.DataFrame(rows)
 
 
-def load_sa007_act_order_detail() -> pd.DataFrame:
-    """Raw SA007 actual sales rows (Act order layout) for report export."""
+def load_sa007_history_detail() -> pd.DataFrame:
+    """SA007歷史銷售紀錄明細（近三月 kg），資料來源 SA007/ 資料夾。"""
     frames: list[pd.DataFrame] = []
     for path in resolve_sa007_paths():
         try:
@@ -925,8 +928,8 @@ def load_sa007_act_order_detail() -> pd.DataFrame:
                     sheet = name
                     break
             raw = pd.read_excel(path, sheet_name=sheet, header=None)
-            if _detect_sa007_workbook_format(raw) == "act_order":
-                part = _parse_sa007_act_order_style(raw, path.name, sheet)
+            if _detect_sa007_workbook_format(raw) == "material_code_layout":
+                part = _parse_sa007_history_sales_style(raw, path.name, SA007_HISTORY_LABEL)
                 if not part.empty:
                     frames.append(part)
         except Exception:
@@ -935,16 +938,23 @@ def load_sa007_act_order_detail() -> pd.DataFrame:
         return exclude_carrier_rows(pd.concat(frames, ignore_index=True))
     sample_path = resolve_sample_path()
     try:
-        act = pd.read_excel(sample_path, sheet_name="Act order", header=None)
-        return exclude_carrier_rows(_parse_sa007_act_order_style(act, sample_path.name, "Act order"))
+        sa007_legacy = pd.read_excel(sample_path, sheet_name=SAMPLE_BALANCE_SA007_SHEET, header=None)
+        return exclude_carrier_rows(
+            _parse_sa007_history_sales_style(sa007_legacy, sample_path.name, SA007_HISTORY_LABEL)
+        )
     except Exception:
         return pd.DataFrame()
 
 
+def load_sa007_act_order_detail() -> pd.DataFrame:
+    """Deprecated alias for load_sa007_history_detail()."""
+    return load_sa007_history_detail()
+
+
 def load_order_history(sample_path: Path | None = None) -> pd.DataFrame:
-    """U7: mean(M-1,M-2,M-3)/1000 ton from SA007/ folder actual sales."""
+    """U7: mean(M-1,M-2,M-3)/1000 ton from SA007/ SA007歷史銷售紀錄。"""
     del sample_path  # legacy arg; SA007 folder is canonical
-    detail = load_sa007_act_order_detail()
+    detail = load_sa007_history_detail()
     if detail.empty:
         return pd.DataFrame(columns=["FG_Code", "Material_Code", "M-1", "M-2", "M-3"])
     return detail.groupby("FG_Code", as_index=False).agg({
@@ -991,7 +1001,7 @@ def _parse_sa007_sales(raw: pd.DataFrame, source: str) -> pd.DataFrame:
             "M-2_kg": m2,
             "M-1_kg": m1,
             "Total_3mo_kg": m1 + m2 + m3,
-            "Source_Sheet": "SA007",
+            "Source_Sheet": SA007_HISTORY_LABEL,
             "Source_File": source,
         })
     return pd.DataFrame(rows)
@@ -1004,8 +1014,8 @@ def _parse_sa006_sheet(raw: pd.DataFrame, source: str) -> pd.DataFrame:
 
 def load_sa007_sales(sa007_dir: Path | None = None) -> pd.DataFrame:
     """
-    Actual sales history (近 3 月) from SA007/ folder.
-    Replaces Sample Balance Act order / SA007 sheet for analysis.
+    SA007歷史銷售紀錄（近 3 月）彙總，資料來源 SA007/ 資料夾。
+    Sample Balance 工作表僅在 SA007/ 為空時 fallback。
     """
     frames: list[pd.DataFrame] = []
     paths = resolve_sa007_paths() if sa007_dir is None else sorted(
@@ -1162,6 +1172,6 @@ def get_data_source_summary() -> dict[str, str]:
         "ms004": f"{resolve_stock_path().name} (Carrier excluded)",
         "mp008": f"{mp008_label} (Carrier excluded)",
         "forecast": f"{fc_dir.name}/ (客戶預估表; Carrier excluded)",
-        "sa007_sales": f"{sa007_label} (實際歷史銷售; Carrier excluded)",
+        "sa007_sales": f"{sa007_label} ({SA007_HISTORY_LABEL}; Carrier excluded)",
         "scope": "不含 Carrier 客戶（本系統僅分析其他客戶訂單）",
     }

@@ -262,7 +262,7 @@ def load_embedded_rules_reference_sheets() -> dict[str, pd.DataFrame]:
     """Built-in U-Stock reference sheets (baseline when no external rules workbook)."""
     rules = [
         ("U-Stock-01", "OWNER 篩選", "必要", "僅 OWNER=PTT 納入配對與 Balance；非 PTT 不填 Code、不計平衡"),
-        ("U-Stock-02", "主檔 RD004", "必要", "Material Code 來自 RD004（Act order + Balance sheet）；一 Code 對一 Common Group"),
+        ("U-Stock-02", "主檔 RD004", "必要", "Material Code 來自 RD004（SA007歷史銷售紀錄 + Balance sheet）；一 Code 對一 Common Group"),
         ("U-Stock-03", "配對主鍵", "必要", "1.Common Group 2.厚度T 3.寬度W；MS004 無原生 Code，需 allocate 貼上"),
         ("U-Stock-04", "MAT SPEC 跨規格", "對照", "實際 MAT SPEC 可與 Code 前綴不同，同 RD004 群組即可（見 MAT SPEC對照表）"),
         ("U-Stock-05", "尾碼 _Common", "尾碼", "跨客戶共通備貨池；同 Code 多列加總進 Balance"),

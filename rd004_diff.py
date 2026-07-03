@@ -11,6 +11,7 @@ import pandas as pd
 from data_loaders import (
     BASE_RD004_COLUMNS,
     RD004_DIR,
+    SA007_HISTORY_LABEL,
     _load_rd004_from_folder,
     _load_rd004_from_sample_balance,
     _text,
@@ -279,7 +280,7 @@ def build_rd004_diff_report() -> dict[str, pd.DataFrame]:
     summary_rows = [
         {
             "項目": "RD004 資料夾",
-            "基準_原本": "Sample Balance Balance sheet + Act order",
+            "基準_原本": f"Sample Balance Balance sheet + {SA007_HISTORY_LABEL}（fallback）",
             "RD004": str(RD004_DIR),
         },
         {

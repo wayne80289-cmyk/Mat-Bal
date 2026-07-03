@@ -144,10 +144,11 @@ def load_balance_materials(sample_path: Path) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def load_act_order_mapping(sample_path: Path) -> dict[tuple, str]:
-    act = pd.read_excel(sample_path, sheet_name="Act order", header=None)
+def load_sa007_history_mapping(sample_path: Path) -> dict[tuple, str]:
+    """Material spec+T+W → Material Code from Sample Balance SA007歷史銷售紀錄工作表（legacy fallback）。"""
+    sa007_legacy = pd.read_excel(sample_path, sheet_name="Act order", header=None)
     mapping: dict[tuple, str] = {}
-    for _, row in act.iloc[4:].iterrows():
+    for _, row in sa007_legacy.iloc[4:].iterrows():
         code = row[0]
         spec = row[1]
         t = row[8]
@@ -157,6 +158,11 @@ def load_act_order_mapping(sample_path: Path) -> dict[tuple, str]:
         key = (normalize_spec(spec), num(t), num(w))
         mapping[key] = normalize_text(code)
     return mapping
+
+
+def load_act_order_mapping(sample_path: Path) -> dict[tuple, str]:
+    """Deprecated alias for load_sa007_history_mapping()."""
+    return load_sa007_history_mapping(sample_path)
 
 
 def spec_matches(stock_spec: str, target_spec: str) -> bool:

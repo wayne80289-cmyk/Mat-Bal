@@ -22,7 +22,7 @@ from data_loaders import (
     load_ms004,
     load_order_history,
     load_rd004_master,
-    load_sa007_act_order_detail,
+    load_sa007_history_detail,
     load_sa007_sales,
     load_so003,
 )
@@ -391,7 +391,7 @@ def run_full_pipeline(target_months: list[str] | None = None) -> pd.DataFrame:
     sources = get_data_source_summary()
     print("=== Penta Thick 現貨/期貨整合計畫系統 ===")
     print("分析範圍: 不含 Carrier 客戶（僅其他客戶訂單）")
-    print("需求資料: Forecast/ 預估表 + SA007/ 實際銷售平均（無預估時）")
+    print("需求資料: Forecast/ 預估表 + SA007/ SA007歷史銷售紀錄（無預估時）")
     print("資料來源:")
     for k, v in sources.items():
         print(f"  {k}: {v}")
@@ -404,13 +404,13 @@ def run_full_pipeline(target_months: list[str] | None = None) -> pd.DataFrame:
     client_forecast = load_client_forecast(target_months)
     sa007_raw = load_sa007_sales()
     sa007_materials = aggregate_sa006_by_material(sa007_raw, rd004)
-    sa007_detail = load_sa007_act_order_detail()
+    sa007_detail = load_sa007_history_detail()
 
     engine = MaterialOrderBalanceSystem()
     print(f"\n  RD004 materials: {len(rd004)}")
     print(f"  MS004 PTT stock rows: {len(ms004)}")
     print(f"  SO003 order rows: {len(so003)}")
-    print(f"  SA007 actual sales rows: {len(sa007_detail)} (3mo pivot: {len(sa007_raw)} → {len(sa007_materials)} materials)")
+    print(f"  SA007歷史銷售紀錄: {len(sa007_detail)} 列 (3mo pivot: {len(sa007_raw)} → {len(sa007_materials)} materials)")
     print(f"  Forecast materials: {len(client_forecast)}")
     forecast_map = engine.integrate_sales_forecast(
         client_forecast, order_history, target_months, sa006_by_material=sa007_materials
