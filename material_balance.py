@@ -334,10 +334,11 @@ def parse_plant1410_forecast(path: Path) -> pd.DataFrame:
     return pd.DataFrame(records)
 
 
-def load_forecast(forecast_dir: Path) -> pd.DataFrame:
-    from pdf_forecast import load_pdf_forecasts
+def load_forecast_vendor_detail(forecast_dir: Path) -> pd.DataFrame:
+    """Load each Forecast/ vendor file separately (partial customers only, U1)."""
+    from pdf_forecast import load_pdf_forecast_vendor_detail
 
-    frames = []
+    frames: list[pd.DataFrame] = []
     for path in sorted(forecast_dir.glob("*.xlsx")):
         if "CARRIER" in path.name.upper():
             continue
@@ -347,18 +348,27 @@ def load_forecast(forecast_dir: Path) -> pd.DataFrame:
             else:
                 part = parse_plant1410_forecast(path)
             if not part.empty:
+                part = part.copy()
+                part["Source_File"] = path.name
                 frames.append(part)
                 print(f"  Parsed {path.name}: {len(part)} rows")
         except Exception as exc:
             print(f"Warning: failed to read {path.name}: {exc}")
 
-    pdf_fc = load_pdf_forecasts(forecast_dir)
+    pdf_fc = load_pdf_forecast_vendor_detail(forecast_dir)
     if not pdf_fc.empty:
         frames.append(pdf_fc)
 
     if not frames:
         return pd.DataFrame()
-    all_fc = pd.concat(frames, ignore_index=True)
+    return pd.concat(frames, ignore_index=True)
+
+
+def load_forecast(forecast_dir: Path) -> pd.DataFrame:
+    """Merge Forecast/ vendor files (partial customers); kg/month by material_code."""
+    all_fc = load_forecast_vendor_detail(forecast_dir)
+    if all_fc.empty:
+        return pd.DataFrame()
     month_cols = [m for m in MONTHS_BALANCE if m in all_fc.columns]
     if not month_cols:
         return pd.DataFrame()

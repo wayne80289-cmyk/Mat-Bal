@@ -18,6 +18,7 @@ from data_loaders import (
     build_fg_to_material_map,
     get_data_source_summary,
     load_client_forecast,
+    build_forecast_integrated_report,
     load_mp008,
     load_ms004,
     load_order_history,
@@ -54,6 +55,10 @@ class MaterialOrderBalanceSystem:
         target_months,
         sa006_by_material=None,
     ):
+        """
+        U1 雙軌需求：有提供預估表之客戶用 Forecast/；其餘用 SA007歷史平均（U7）。
+        Forecast/ 非全部客戶總需求。
+        """
         integrated_forecast = {}
         fg_codes: set[str] = set()
         if not client_forecast_df.empty and "Material_Code" in client_forecast_df.columns:
@@ -391,7 +396,7 @@ def run_full_pipeline(target_months: list[str] | None = None) -> pd.DataFrame:
     sources = get_data_source_summary()
     print("=== Penta Thick 現貨/期貨整合計畫系統 ===")
     print("分析範圍: 不含 Carrier 客戶（僅其他客戶訂單）")
-    print("需求資料: Forecast/ 預估表 + SA007/ SA007歷史銷售紀錄（無預估時）")
+    print("需求資料: Forecast/ 有提供預估表之客戶 + SA007/ 歷史平均（其餘客戶 U7）")
     print("資料來源:")
     for k, v in sources.items():
         print(f"  {k}: {v}")
@@ -402,6 +407,7 @@ def run_full_pipeline(target_months: list[str] | None = None) -> pd.DataFrame:
     mp008_raw = load_mp008()
     order_history = load_order_history()
     client_forecast = load_client_forecast(target_months)
+    forecast_report_sheets = build_forecast_integrated_report(target_months)
     sa007_raw = load_sa007_sales()
     sa007_materials = aggregate_sa006_by_material(sa007_raw, rd004)
     sa007_detail = load_sa007_history_detail()
@@ -411,7 +417,7 @@ def run_full_pipeline(target_months: list[str] | None = None) -> pd.DataFrame:
     print(f"  MS004 PTT stock rows: {len(ms004)}")
     print(f"  SO003 order rows: {len(so003)}")
     print(f"  SA007歷史銷售紀錄: {len(sa007_detail)} 列 (3mo pivot: {len(sa007_raw)} → {len(sa007_materials)} materials)")
-    print(f"  Forecast materials: {len(client_forecast)}")
+    print(f"  Forecast（有提供預估表）: {len(client_forecast)} materials")
     forecast_map = engine.integrate_sales_forecast(
         client_forecast, order_history, target_months, sa006_by_material=sa007_materials
     )
@@ -457,6 +463,8 @@ def run_full_pipeline(target_months: list[str] | None = None) -> pd.DataFrame:
         mp008.to_excel(writer, sheet_name="MP008", index=False)
         cleaned_stock.to_excel(writer, sheet_name="MS004_Allocatable_Stock", index=False)
         client_forecast.to_excel(writer, sheet_name="Forecast", index=False)
+        for sheet_name, sheet_df in forecast_report_sheets.items():
+            sheet_df.to_excel(writer, sheet_name=sheet_name[:31], index=False)
         sa007_detail.to_excel(writer, sheet_name="SA007", index=False)
         sa007_materials.to_excel(writer, sheet_name="SA007_近3月彙總", index=False)
         source_rows.to_excel(writer, sheet_name="Data Sources", index=False)

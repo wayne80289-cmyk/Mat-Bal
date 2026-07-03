@@ -21,6 +21,8 @@ MP008_DIR = BASE_DIR / "MP008"
 RD004_DIR = BASE_DIR / "RD004"
 FORECAST_DIR = BASE_DIR / "Forecast"
 FORECAST_DIR_LEGACY = BASE_DIR / "Froecast"
+# U1: Forecast/ 僅含「有提供預估表」的客戶，非全部客戶總需求
+FORECAST_SCOPE_LABEL = "有提供預估表之客戶（非全部客戶需求）"
 OUTPUT_DIR = BASE_DIR / "Output"
 
 SAMPLE_PATH = SAMPLE_DIR / "All Customer review Jun '2026 review 20.06.2026.xlsx"
@@ -776,7 +778,7 @@ def _parse_penta_schedule(path: Path) -> pd.DataFrame:
 
 
 def load_client_forecast(target_months: list[str] | None = None) -> pd.DataFrame:
-    """Client forecast from Forecast/ folder (vendor xlsx + pdf)."""
+    """有提供預估表之客戶 Forecast（Forecast/ 資料夾；非全部客戶需求，見 U1）。"""
     import contextlib
     import io
 
@@ -787,7 +789,7 @@ def load_client_forecast(target_months: list[str] | None = None) -> pd.DataFrame
     with contextlib.redirect_stdout(io.StringIO()):
         fc = load_forecast(fc_dir)
     if fc.empty:
-        return pd.DataFrame(columns=["Material_Code", *target_months, "Forecast_Source"])
+        return pd.DataFrame(columns=["Material_Code", *target_months, "Forecast_Source", "Forecast_Scope"])
 
     records = []
     for _, row in fc.iterrows():
@@ -798,12 +800,85 @@ def load_client_forecast(target_months: list[str] | None = None) -> pd.DataFrame
         records.append(rec)
     df = pd.DataFrame(records)
     if df.empty:
-        return pd.DataFrame(columns=["Material_Code", *target_months, "Forecast_Source"])
+        return pd.DataFrame(columns=["Material_Code", *target_months, "Forecast_Source", "Forecast_Scope"])
     month_cols = [m for m in target_months if m in df.columns]
     grouped = df.groupby("Material_Code", as_index=False)[month_cols].sum()
+    grouped["Forecast_Scope"] = FORECAST_SCOPE_LABEL
     grouped["Forecast_Source"] = fc_dir.name
     grouped["Source"] = "Forecast"
     return grouped
+
+
+_MONTH_SHORT = {"06": "Jun", "07": "Jul", "08": "Aug", "09": "Sep", "10": "Oct"}
+
+
+def build_forecast_integrated_report(target_months: list[str] | None = None) -> dict[str, pd.DataFrame]:
+    """
+    Integrate Forecast/ vendor files into one report.
+    Scope: customers who submitted forecasts only (U1); not all customer demand.
+    """
+    import contextlib
+    import io
+
+    from material_balance import MONTHS_BALANCE, load_forecast_vendor_detail
+
+    target_months = target_months or TARGET_MONTHS
+    fc_dir = resolve_forecast_dir()
+    with contextlib.redirect_stdout(io.StringIO()):
+        detail = load_forecast_vendor_detail(fc_dir)
+
+    info_rows = [
+        {"項目": "資料範圍", "內容": FORECAST_SCOPE_LABEL},
+        {"項目": "說明", "內容": "未提供預估表之客戶需求由 SA007歷史銷售紀錄平均估算（U7），不在此報告內"},
+        {"項目": "資料夾", "內容": str(fc_dir)},
+        {"項目": "各家檔案數", "內容": detail["Source_File"].nunique() if not detail.empty and "Source_File" in detail.columns else 0},
+        {"項目": "明細列數", "內容": len(detail)},
+    ]
+    if not detail.empty and "Source_File" in detail.columns:
+        for fname, cnt in detail["Source_File"].value_counts().sort_index().items():
+            info_rows.append({"項目": f"檔案: {fname}", "內容": f"{int(cnt)} 列"})
+
+    if detail.empty:
+        empty_cols = ["Source_File", "material_code", "spec", "t", "w", *target_months]
+        return {
+            "Forecast_說明": pd.DataFrame(info_rows),
+            "Forecast_各家明細": pd.DataFrame(columns=empty_cols),
+            "Forecast_整合彙總": pd.DataFrame(columns=["Material_Code", *target_months, "Vendor_Count"]),
+        }
+
+    vendor_rows = []
+    for _, row in detail.iterrows():
+        rec = {
+            "Source_File": _text(row.get("Source_File")),
+            "Parser": _text(row.get("source")),
+            "Material_Code": _text(row.get("material_code")),
+            "Spec": _text(row.get("spec")),
+            "T": _num(row.get("t")),
+            "W": _num(row.get("w")),
+        }
+        for ym in target_months:
+            short = _MONTH_SHORT[ym.split("-")[1]]
+            rec[f"{ym}_kg"] = _num(row.get(short, 0))
+            rec[f"{ym}_Ton"] = round(_num(row.get(short, 0)) / 1000.0, 3)
+        vendor_rows.append(rec)
+    vendor_df = pd.DataFrame(vendor_rows)
+
+    summary_records = []
+    ton_cols = [f"{ym}_Ton" for ym in target_months]
+    for mat, grp in vendor_df.groupby("Material_Code", dropna=False):
+        if not _text(mat):
+            continue
+        rec = {"Material_Code": _text(mat), "Vendor_Count": grp["Source_File"].nunique()}
+        for ym in target_months:
+            rec[ym] = round(grp[f"{ym}_Ton"].sum(), 3)
+        summary_records.append(rec)
+    summary_df = pd.DataFrame(summary_records)
+
+    return {
+        "Forecast_說明": pd.DataFrame(info_rows),
+        "Forecast_各家明細": vendor_df,
+        "Forecast_整合彙總": summary_df,
+    }
 
 
 def _detect_sa007_workbook_format(raw: pd.DataFrame) -> str:
@@ -1171,7 +1246,7 @@ def get_data_source_summary() -> dict[str, str]:
         "so003": f"{so003_label} (Carrier excluded)",
         "ms004": f"{resolve_stock_path().name} (Carrier excluded)",
         "mp008": f"{mp008_label} (Carrier excluded)",
-        "forecast": f"{fc_dir.name}/ (客戶預估表; Carrier excluded)",
+        "forecast": f"{fc_dir.name}/ ({FORECAST_SCOPE_LABEL}; Carrier excluded)",
         "sa007_sales": f"{sa007_label} ({SA007_HISTORY_LABEL}; Carrier excluded)",
         "scope": "不含 Carrier 客戶（本系統僅分析其他客戶訂單）",
     }
