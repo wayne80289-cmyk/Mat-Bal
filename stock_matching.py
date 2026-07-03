@@ -9,18 +9,24 @@ from pathlib import Path
 import pandas as pd
 
 BASE_DIR = Path(__file__).resolve().parent
+RD004_DIR = BASE_DIR / "RD004"
 RULES_CANDIDATES = [
-    BASE_DIR / "History Balance" / "Stock-Material-Code-Matching-Rules.xlsx",
+    RD004_DIR / "Stock-Material-Code-Matching-Rules.xlsx",
     BASE_DIR / "Stock-Material-Code-Matching-Rules.xlsx",
+    BASE_DIR / "History Balance" / "Stock-Material-Code-Matching-Rules.xlsx",
     BASE_DIR / "stock-material-code-matching-rules.xlsx",
 ]
 
 
 def resolve_rules_path() -> Path:
+    if RD004_DIR.is_dir():
+        rd004_rules = RD004_DIR / "Stock-Material-Code-Matching-Rules.xlsx"
+        if rd004_rules.exists():
+            return rd004_rules
     for path in RULES_CANDIDATES:
         if path.exists():
             return path
-    search_dirs = [BASE_DIR, BASE_DIR / "History Balance"]
+    search_dirs = [RD004_DIR, BASE_DIR, BASE_DIR / "History Balance"]
     for directory in search_dirs:
         if not directory.exists():
             continue
@@ -287,18 +293,31 @@ def load_matching_rules(rules_path: Path | None = None) -> dict:
 
 
 def load_rules_workbook_sheets(rules_path: Path | None = None) -> dict[str, pd.DataFrame]:
-    """Load reference sheets from matching rules workbook for report export."""
-    rules_path = rules_path or resolve_rules_path()
+    """Load pairing reference sheets from RD004/ (Material Master export Rules_* tabs, then rules workbook)."""
     sheets: dict[str, pd.DataFrame] = {}
-    if not rules_path.exists():
-        return sheets
-    try:
-        xl = pd.ExcelFile(rules_path)
-        for name in RULES_REFERENCE_SHEETS:
-            if name in xl.sheet_names:
-                sheets[name] = pd.read_excel(rules_path, sheet_name=name)
-    except Exception:
-        pass
+
+    from data_loaders import resolve_rd004_master_path
+
+    master_path = resolve_rd004_master_path()
+    if master_path and master_path.exists():
+        try:
+            xl = pd.ExcelFile(master_path)
+            for name in xl.sheet_names:
+                if name.startswith("Rules_"):
+                    key = name[len("Rules_"):]
+                    sheets[key] = pd.read_excel(master_path, sheet_name=name)
+        except Exception:
+            pass
+
+    rules_path = rules_path or resolve_rules_path()
+    if rules_path.exists():
+        try:
+            xl = pd.ExcelFile(rules_path)
+            for name in RULES_REFERENCE_SHEETS:
+                if name not in sheets and name in xl.sheet_names:
+                    sheets[name] = pd.read_excel(rules_path, sheet_name=name)
+        except Exception:
+            pass
     return sheets
 
 

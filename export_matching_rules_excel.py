@@ -9,7 +9,7 @@ from openpyxl import load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-OUT_DIR = Path(__file__).resolve().parent / "History Balance"
+OUT_DIR = Path(__file__).resolve().parent / "RD004"
 OUT_PATH = OUT_DIR / "Stock-Material-Code-Matching-Rules.xlsx"
 
 
@@ -17,7 +17,7 @@ def write_sheets(writer: pd.ExcelWriter) -> None:
   # Sheet 1: 說明
     pd.DataFrame([
         {"項目": "文件名稱", "內容": "Stock Material Code 配對庫存規則清單"},
-        {"項目": "分析來源", "內容": "History Balance/ 2026-01～06 共 7 份工作簿 Stock 工作表"},
+        {"項目": "分析來源", "內容": "RD004/ Material Master 與 Stock-Material-Code-Matching-Rules"},
         {"項目": "對照工作表", "內容": "Balance sheet (Update)、Act order、Original material code（01月）"},
         {"項目": "產出日期", "內容": datetime.now().strftime("%Y-%m-%d %H:%M")},
         {"項目": "用途", "內容": "供檢查 MS004 庫存配對 Material Code 之業務規則"},

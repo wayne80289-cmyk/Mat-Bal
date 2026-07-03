@@ -465,7 +465,14 @@ def run_full_pipeline(target_months: list[str] | None = None) -> pd.DataFrame:
     print(f"  Balance materials: {len(result)}")
     print(f"  現貨緊急調貨 (SA007×近2月): {len(spot_plan)} 項")
     print(f"  期貨備貨計畫 (SA007×第3-5月): {len(future_plan)} 項")
-    print(f"  Material Master (rules: {resolve_rules_path().name}): {len(material_master)} 項")
+    from data_loaders import resolve_rd004_master_path
+
+    rd004_src = resolve_rd004_master_path()
+    rd004_name = rd004_src.name if rd004_src else "Sample Balance fallback"
+    print(
+        f"  Material Master ({rd004_name}; rules: {resolve_rules_path().name}): "
+        f"{len(material_master)} 項, Rules sheets: {len(rules_sheets)}"
+    )
     return result
 
 

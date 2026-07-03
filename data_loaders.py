@@ -15,6 +15,7 @@ STOCK_DIR = BASE_DIR / "Stock"
 SA007_DIR = BASE_DIR / "SA007"
 SO003_DIR = BASE_DIR / "SO003"
 MP008_DIR = BASE_DIR / "MP008"
+RD004_DIR = BASE_DIR / "RD004"
 FORECAST_DIR = BASE_DIR / "Forecast"
 FORECAST_DIR_LEGACY = BASE_DIR / "Froecast"
 OUTPUT_DIR = BASE_DIR / "Output"
@@ -25,6 +26,19 @@ STOCK_PATH = STOCK_DIR / "MS004-260619.xls"
 TARGET_MONTHS = ["2026-06", "2026-07", "2026-08", "2026-09", "2026-10"]
 MONTH_TO_YM = {"Jun": "2026-06", "Jul": "2026-07", "Aug": "2026-08", "Sep": "2026-09", "Oct": "2026-10"}
 FORECAST_KG_COLS = {"Jun": 43, "Jul": 45, "Aug": 47, "Sep": 49, "Oct": 51}
+
+BASE_RD004_COLUMNS = [
+    "Material_Code",
+    "Common_Group",
+    "Spec",
+    "Thickness",
+    "Width",
+    "FG_Code",
+    "FG_Codes_All",
+    "Kind",
+    "Main_Customer",
+    "MOQ",
+]
 
 
 def _num(v) -> float:
@@ -111,6 +125,25 @@ def resolve_so003_paths() -> list[Path]:
     return unique
 
 
+def resolve_rd004_master_path() -> Path | None:
+    """Newest Material Master export under RD004/."""
+    if not RD004_DIR.is_dir():
+        return None
+    matches: list[Path] = []
+    for pattern in ("Material Master*.xlsx", "*Material*Master*.xlsx", "RD004*.xlsx"):
+        matches.extend(RD004_DIR.glob(pattern))
+    matches = [
+        p for p in matches
+        if p.suffix.lower() == ".xlsx"
+        and not is_carrier_path(p)
+        and "matching-rules" not in p.name.lower()
+        and "stock-material" not in p.name.lower()
+    ]
+    if not matches:
+        return None
+    return max(matches, key=lambda p: p.stat().st_mtime)
+
+
 def resolve_mp008_paths() -> list[Path]:
     """All MP008 open-PO exports under MP008/ (newest last)."""
     if not MP008_DIR.is_dir():
@@ -135,7 +168,7 @@ def discover_file(
     exclude_carrier: bool = True,
 ) -> Path | None:
     """Return newest matching file across search directories."""
-    search_dirs = search_dirs or [SAMPLE_DIR, resolve_forecast_dir(), SA007_DIR, SO003_DIR, MP008_DIR, BASE_DIR]
+    search_dirs = search_dirs or [SAMPLE_DIR, resolve_forecast_dir(), SA007_DIR, SO003_DIR, MP008_DIR, RD004_DIR, BASE_DIR]
     matches: list[Path] = []
     for directory in search_dirs:
         if not directory.exists():
@@ -295,9 +328,89 @@ def _resolve_material_fg_and_width(
     return fg_primary, fg_all, width
 
 
-def load_rd004_master(sample_path: Path | None = None) -> pd.DataFrame:
-    """Build material master from Balance sheet + Act order."""
-    sample_path = sample_path or resolve_sample_path()
+def _load_forecast_fg_map_from_folder() -> dict[str, str]:
+    """Material_Code → FG_Code from Forecast/ vendor xlsx (best-effort)."""
+    fg_map: dict[str, str] = {}
+    fc_dir = resolve_forecast_dir()
+    if not fc_dir.is_dir():
+        return fg_map
+    for path in sorted(fc_dir.glob("*.xlsx")):
+        if is_carrier_path(path):
+            continue
+        try:
+            raw = pd.read_excel(path, sheet_name=0, header=None)
+            for r in range(min(30, len(raw)), len(raw)):
+                code = raw.iloc[r, 0]
+                fg = raw.iloc[r, 2] if raw.shape[1] > 2 else None
+                if pd.isna(code):
+                    continue
+                code_t, fg_t = _text(code), _text(fg)
+                if code_t and fg_t:
+                    fg_map[code_t] = fg_t
+        except Exception:
+            continue
+    return fg_map
+
+
+def _normalize_rd004_master_df(df: pd.DataFrame, forecast_fg_map: dict[str, str] | None = None) -> pd.DataFrame:
+    """Keep base RD004 columns; fix nulls and FG/Width from Material Code where needed."""
+    from stock_matching import parse_product_width_from_material_code
+
+    forecast_fg_map = forecast_fg_map or {}
+    out = df.copy()
+    for col in BASE_RD004_COLUMNS:
+        if col not in out.columns:
+            out[col] = "" if col not in ("Thickness", "Width", "MOQ") else 0.0
+
+    records = []
+    for _, row in out.iterrows():
+        code = _text(row["Material_Code"])
+        if not code:
+            continue
+        t = _num(row.get("Thickness"))
+        spec = _text(row.get("Spec"))
+        common = _text(row.get("Common_Group")) or spec or code
+        pw = parse_product_width_from_material_code(code, t)
+        width = pw if pw and pw > 0 else _num(row.get("Width")) or 1219.0
+        fg = _text(row.get("FG_Code"))
+        fg_all = _text(row.get("FG_Codes_All")) or fg
+        if forecast_fg_map.get(code):
+            fg = forecast_fg_map[code]
+            fg_all = fg
+        elif pw and pw > 0 and round(pw, 0) != 1219:
+            if not fg or "1219x1219" in fg.replace(" ", ""):
+                fg = f"{t:g}x{pw:g}xCoil".replace(".0", "")
+                fg_all = fg
+        records.append({
+            "Material_Code": code,
+            "Common_Group": common,
+            "Spec": spec,
+            "Thickness": t,
+            "Width": width,
+            "FG_Code": fg or code,
+            "FG_Codes_All": fg_all or fg or code,
+            "Kind": _text(row.get("Kind")),
+            "Main_Customer": _text(row.get("Main_Customer")),
+            "MOQ": _num(row.get("MOQ")),
+        })
+    return pd.DataFrame(records)
+
+
+def _load_rd004_from_folder() -> pd.DataFrame:
+    path = resolve_rd004_master_path()
+    if not path:
+        return pd.DataFrame(columns=BASE_RD004_COLUMNS)
+    xl = pd.ExcelFile(path)
+    sheet = "Material Master" if "Material Master" in xl.sheet_names else xl.sheet_names[0]
+    df = pd.read_excel(path, sheet_name=sheet)
+    fg_map = _load_forecast_fg_map_from_folder()
+    if not fg_map:
+        fg_map = _load_forecast_fg_map(resolve_sample_path())
+    return _normalize_rd004_master_df(df, fg_map)
+
+
+def _load_rd004_from_sample_balance(sample_path: Path) -> pd.DataFrame:
+    """Legacy: build RD004 from Sample Balance Balance sheet + Act order."""
     bal = pd.read_excel(sample_path, sheet_name="Balance sheet (Update)", header=None)
     act = pd.read_excel(sample_path, sheet_name="Act order", header=None)
     forecast_fg_map = _load_forecast_fg_map(sample_path)
@@ -349,7 +462,15 @@ def load_rd004_master(sample_path: Path | None = None) -> pd.DataFrame:
             "Main_Customer": main_customer,
             "MOQ": 0.0,
         })
-    df = pd.DataFrame(records)
+    return pd.DataFrame(records)
+
+
+def load_rd004_master(sample_path: Path | None = None) -> pd.DataFrame:
+    """Material master + pairing base from RD004/ folder (fallback: Sample Balance)."""
+    df = _load_rd004_from_folder()
+    if df.empty:
+        sample_path = sample_path or resolve_sample_path()
+        df = _load_rd004_from_sample_balance(sample_path)
     df = df[~df["Main_Customer"].map(lambda v: is_carrier_label(v))]
     from stock_matching import supplement_rd004_pairing_materials
 
@@ -1010,6 +1131,7 @@ def get_data_source_summary() -> dict[str, str]:
     from stock_matching import resolve_rules_path
 
     rules_path = resolve_rules_path()
+    rd004_master = resolve_rd004_master_path()
     sa007_paths = resolve_sa007_paths()
     so003_paths = resolve_so003_paths()
     mp008_paths = resolve_mp008_paths()
@@ -1017,13 +1139,24 @@ def get_data_source_summary() -> dict[str, str]:
     sa007_label = ", ".join(p.name for p in sa007_paths) if sa007_paths else f"{SA007_DIR.name}/ (empty → Sample Balance fallback)"
     so003_label = ", ".join(p.name for p in so003_paths) if so003_paths else f"{SO003_DIR.name}/ (empty → Sample Balance fallback)"
     mp008_label = ", ".join(p.name for p in mp008_paths) if mp008_paths else f"{MP008_DIR.name}/ (empty → Sample Balance fallback)"
+    rd004_master_label = (
+        rd004_master.name
+        if rd004_master
+        else f"{RD004_DIR.name}/ (empty → Sample Balance fallback)"
+    )
+    rules_label = (
+        f"{RD004_DIR.name}/{rules_path.name}"
+        if rules_path.exists() and rules_path.parent.resolve() == RD004_DIR.resolve()
+        else (rules_path.name if rules_path.exists() else f"{rules_path.name} (embedded defaults)")
+    )
     return {
         "sample_balance": str(resolve_sample_path().name),
+        "rd004_master": f"{rd004_master_label} (Material Master; Carrier excluded)",
+        "rd004_pairing_rules": f"{rules_label} (配對規則/流程/MAT SPEC對照)",
         "so003": f"{so003_label} (Carrier excluded)",
         "ms004": f"{resolve_stock_path().name} (Carrier excluded)",
         "mp008": f"{mp008_label} (Carrier excluded)",
         "forecast": f"{fc_dir.name}/ (客戶預估表; Carrier excluded)",
         "sa007_sales": f"{sa007_label} (實際歷史銷售; Carrier excluded)",
-        "stock_matching_rules": rules_path.name if rules_path.exists() else f"{rules_path.name} (embedded defaults)",
         "scope": "不含 Carrier 客戶（本系統僅分析其他客戶訂單）",
     }
