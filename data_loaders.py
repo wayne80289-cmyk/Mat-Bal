@@ -812,6 +812,55 @@ def load_client_forecast(target_months: list[str] | None = None) -> pd.DataFrame
     return grouped
 
 
+def load_balance_forecast(
+    rd004: pd.DataFrame,
+    target_months: list[str] | None = None,
+) -> pd.DataFrame:
+    """
+    Map Forecast/ vendor rows onto RD004 Material_Code (spec + T + W).
+    This is what Balance Forecast_Ton uses; vendor codes rarely match RD004 exactly.
+    """
+    import contextlib
+    import io
+
+    from material_balance import MONTHS_BALANCE, load_forecast, match_forecast_to_material
+
+    target_months = target_months or TARGET_MONTHS
+    month_short = {"06": "Jun", "07": "Jul", "08": "Aug", "09": "Sep", "10": "Oct"}
+    fc_dir = resolve_forecast_dir()
+    with contextlib.redirect_stdout(io.StringIO()):
+        vendor_fc = load_forecast(fc_dir)
+
+    cols = ["Material_Code", "FG_Code", *target_months, "Forecast_Scope", "Forecast_Source"]
+    if vendor_fc.empty or rd004.empty:
+        return pd.DataFrame(columns=cols)
+
+    records = []
+    for _, row in rd004.iterrows():
+        code = _text(row["Material_Code"])
+        if not code:
+            continue
+        matched_kg = match_forecast_to_material(code, vendor_fc)
+        rec = {
+            "Material_Code": code,
+            "FG_Code": _text(row.get("FG_Code")),
+            "Forecast_Scope": FORECAST_SCOPE_LABEL,
+            "Forecast_Source": fc_dir.name,
+        }
+        total_ton = 0.0
+        for ym in target_months:
+            short = month_short[ym.split("-")[1]]
+            ton = _num(matched_kg.get(short, 0)) / 1000.0
+            rec[ym] = round(ton, 6)
+            total_ton += ton
+        if total_ton > 0:
+            records.append(rec)
+
+    if not records:
+        return pd.DataFrame(columns=cols)
+    return pd.DataFrame(records)
+
+
 _MONTH_SHORT = {"06": "Jun", "07": "Jul", "08": "Aug", "09": "Sep", "10": "Oct"}
 
 

@@ -17,6 +17,7 @@ from data_loaders import (
     aggregate_sa006_by_material,
     build_fg_to_material_map,
     get_data_source_summary,
+    load_balance_forecast,
     load_client_forecast,
     build_forecast_integrated_report,
     load_mp008,
@@ -87,6 +88,10 @@ class MaterialOrderBalanceSystem:
                     client_f = client_forecast_df[
                         client_forecast_df["Material_Code"] == fg_code
                     ][month].sum()
+                    if client_f == 0 and "FG_Code" in client_forecast_df.columns:
+                        client_f = client_forecast_df[
+                            client_forecast_df["FG_Code"].astype(str) == str(fg_code)
+                        ][month].sum()
 
                 calculated_f = 0.0
                 if client_f == 0:
@@ -408,7 +413,7 @@ def run_full_pipeline(target_months: list[str] | None = None) -> pd.DataFrame:
     so003 = load_so003()
     mp008_raw = load_mp008()
     order_history = load_order_history()
-    client_forecast = load_client_forecast(target_months)
+    client_forecast = load_balance_forecast(rd004, target_months)
     forecast_report_sheets = build_forecast_integrated_report(target_months)
     sa007_raw = load_sa007_sales()
     sa007_materials = aggregate_sa006_by_material(sa007_raw, rd004)
@@ -419,7 +424,7 @@ def run_full_pipeline(target_months: list[str] | None = None) -> pd.DataFrame:
     print(f"  MS004 PTT stock rows: {len(ms004)}")
     print(f"  SO003 order rows: {len(so003)}")
     print(f"  SA007歷史銷售紀錄: {len(sa007_detail)} 列 (3mo pivot: {len(sa007_raw)} → {len(sa007_materials)} materials)")
-    print(f"  Forecast（有提供預估表）: {len(client_forecast)} materials")
+    print(f"  Forecast（RD004 配對）: {len(client_forecast)} materials")
     forecast_map = engine.integrate_sales_forecast(
         client_forecast, order_history, target_months, sa006_by_material=sa007_materials
     )
