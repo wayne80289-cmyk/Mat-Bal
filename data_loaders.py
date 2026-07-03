@@ -166,11 +166,84 @@ def _parse_so003_raw(raw: pd.DataFrame, source: str) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _load_forecast_fg_map(sample_path: Path) -> dict[str, str]:
+    """Material_Code → FG_Code from Sample Balance Forecast sheet."""
+    try:
+        fc = pd.read_excel(sample_path, sheet_name="Forecast", header=None)
+    except Exception:
+        return {}
+    fg_map: dict[str, str] = {}
+    for r in range(4, len(fc)):
+        code = fc.iloc[r, 0]
+        fg = fc.iloc[r, 2]
+        if pd.isna(code):
+            continue
+        code_t = _text(code)
+        fg_t = _text(fg)
+        if code_t and fg_t:
+            fg_map[code_t] = fg_t
+    return fg_map
+
+
+def _parse_fg_from_main_customer(main_customer: str) -> str:
+    """e.g. TSGP 1.0x1326xCoil → 1.0x1326xCoil"""
+    text = _text(main_customer)
+    m = re.search(r"([\d.]+)\s*[xX]\s*([\d.]+)\s*[xX]\s*(\w+)", text)
+    if not m:
+        return ""
+    return f"{m.group(1)}x{m.group(2)}x{m.group(3)}".replace(".0", "")
+
+
+def _resolve_material_fg_and_width(
+    code: str,
+    thickness: float,
+    act_info: dict,
+    fg_codes: set[str],
+    forecast_fg: str,
+    main_customer: str,
+) -> tuple[str, str, float]:
+    """Resolve FG_Code / FG_Codes_All / finished Width for RD004 master."""
+    from stock_matching import parse_product_width_from_material_code
+
+    product_w = parse_product_width_from_material_code(code, thickness)
+    act_w = _num(act_info.get("Width"))
+    if product_w and product_w > 0 and round(product_w, 0) != 1219:
+        width = product_w
+    elif act_w > 0:
+        width = act_w
+    else:
+        width = 1219.0
+
+    if fg_codes:
+        fg_primary = sorted(fg_codes)[0]
+        fg_all = ",".join(sorted(fg_codes))
+    elif forecast_fg:
+        fg_primary = forecast_fg
+        fg_all = forecast_fg
+    elif product_w and product_w > 0 and round(product_w, 0) != 1219:
+        fg_primary = f"{thickness:g}x{product_w:g}xCoil".replace(".0", "")
+        fg_all = fg_primary
+    else:
+        mc_fg = _parse_fg_from_main_customer(main_customer)
+        if mc_fg:
+            fg_primary = mc_fg
+            fg_all = mc_fg
+        elif act_w > 0 and round(act_w, 0) != 1219:
+            fg_primary = f"{thickness:g}x{act_w:g}xCoil".replace(".0", "")
+            fg_all = fg_primary
+        else:
+            fg_primary = code
+            fg_all = code
+
+    return fg_primary, fg_all, width
+
+
 def load_rd004_master(sample_path: Path | None = None) -> pd.DataFrame:
     """Build material master from Balance sheet + Act order."""
     sample_path = sample_path or resolve_sample_path()
     bal = pd.read_excel(sample_path, sheet_name="Balance sheet (Update)", header=None)
     act = pd.read_excel(sample_path, sheet_name="Act order", header=None)
+    forecast_fg_map = _load_forecast_fg_map(sample_path)
 
     fg_map: dict[str, set[str]] = {}
     spec_map: dict[str, dict] = {}
@@ -197,20 +270,26 @@ def load_rd004_master(sample_path: Path | None = None) -> pd.DataFrame:
         code = _text(code)
         info = spec_map.get(code, {})
         t = _num(bal.iloc[i, 3]) or info.get("Thickness", 0)
-        w = info.get("Width", 1219)
+        main_customer = _text(bal.iloc[i, 4])
         fg_codes = fg_map.get(code, set())
-        dim_fg = f"{t:g}x{w:g}x1219".replace(".0", "")
-        fg_primary = dim_fg if dim_fg else (next(iter(fg_codes)) if fg_codes else code)
+        fg_primary, fg_all, width = _resolve_material_fg_and_width(
+            code,
+            t,
+            info,
+            fg_codes,
+            forecast_fg_map.get(code, ""),
+            main_customer,
+        )
         records.append({
             "Material_Code": code,
             "Common_Group": info.get("Spec", code),
             "Spec": info.get("Spec", ""),
             "Thickness": t,
-            "Width": w,
+            "Width": width,
             "FG_Code": fg_primary,
-            "FG_Codes_All": ",".join(sorted(fg_codes)) if fg_codes else fg_primary,
+            "FG_Codes_All": fg_all,
             "Kind": info.get("Kind", _text(bal.iloc[i, 2])),
-            "Main_Customer": _text(bal.iloc[i, 4]),
+            "Main_Customer": main_customer,
             "MOQ": 0.0,
         })
     df = pd.DataFrame(records)
