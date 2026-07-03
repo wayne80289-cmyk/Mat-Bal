@@ -1153,6 +1153,11 @@ def get_data_source_summary() -> dict[str, str]:
         "sample_balance": str(resolve_sample_path().name),
         "rd004_master": f"{rd004_master_label} (Material Master; Carrier excluded)",
         "rd004_pairing_rules": f"{rules_label} (配對規則/流程/MAT SPEC對照)",
+        "rd004_diff": (
+            "RD004_差異摘要 / RD004_差異_主檔 / RD004_差異_配對規則"
+            if rd004_master
+            else "N/A (RD004/ 為空)"
+        ),
         "so003": f"{so003_label} (Carrier excluded)",
         "ms004": f"{resolve_stock_path().name} (Carrier excluded)",
         "mp008": f"{mp008_label} (Carrier excluded)",

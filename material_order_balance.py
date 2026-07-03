@@ -437,6 +437,10 @@ def run_full_pipeline(target_months: list[str] | None = None) -> pd.DataFrame:
     )
     rules_sheets = load_rules_workbook_sheets()
 
+    from rd004_diff import build_rd004_diff_report
+
+    rd004_diff_sheets = build_rd004_diff_report()
+
     OUTPUT_DIR.mkdir(exist_ok=True)
     ts = datetime.datetime.now().strftime("%d.%m.%Y_%H%M")
     out_path = OUTPUT_DIR / f"Supply Plan {ts}.xlsx"
@@ -460,6 +464,8 @@ def run_full_pipeline(target_months: list[str] | None = None) -> pd.DataFrame:
         for sheet_name, sheet_df in rules_sheets.items():
             safe = f"Rules_{sheet_name}"[:31]
             sheet_df.to_excel(writer, sheet_name=safe, index=False)
+        for sheet_name, sheet_df in rd004_diff_sheets.items():
+            sheet_df.to_excel(writer, sheet_name=sheet_name[:31], index=False)
 
     print(f"\nReport saved: {out_path}")
     print(f"  Balance materials: {len(result)}")
@@ -473,6 +479,10 @@ def run_full_pipeline(target_months: list[str] | None = None) -> pd.DataFrame:
         f"  Material Master ({rd004_name}; rules: {resolve_rules_path().name}): "
         f"{len(material_master)} 項, Rules sheets: {len(rules_sheets)}"
     )
+    if rd004_diff_sheets:
+        md = rd004_diff_sheets.get("RD004_差異_主檔", pd.DataFrame())
+        rd = rd004_diff_sheets.get("RD004_差異_配對規則", pd.DataFrame())
+        print(f"  RD004 vs 原本差異: 主檔 {len(md)} 筆, 配對規則 {len(rd)} 筆")
     return result
 
 

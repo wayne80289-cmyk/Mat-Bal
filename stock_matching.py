@@ -39,6 +39,25 @@ def resolve_rules_path() -> Path:
     return RULES_CANDIDATES[0]
 
 
+def resolve_baseline_rules_path() -> Path | None:
+    """Original pairing rules workbook outside RD004/ (pre-folder layout)."""
+    for path in RULES_CANDIDATES:
+        if path.parent.resolve() == RD004_DIR.resolve():
+            continue
+        if path.exists():
+            return path
+    for directory in [BASE_DIR, BASE_DIR / "History Balance"]:
+        if not directory.exists():
+            continue
+        for path in directory.iterdir():
+            if path.suffix.lower() != ".xlsx":
+                continue
+            name = path.name.lower()
+            if "stock" in name and "matching" in name and "rules" in name:
+                return path
+    return None
+
+
 RULES_REFERENCE_SHEETS = (
     "配對規則清單",
     "MAT SPEC對照",
@@ -237,6 +256,54 @@ def _prefix_matches_group(prefix_compact: str, spec: str, common_group: str) -> 
             if key.startswith(prefix_compact[:6]) or prefix_compact.startswith(key[:6]):
                 return True
     return False
+
+
+def load_embedded_rules_reference_sheets() -> dict[str, pd.DataFrame]:
+    """Built-in U-Stock reference sheets (baseline when no external rules workbook)."""
+    rules = [
+        ("U-Stock-01", "OWNER 篩選", "必要", "僅 OWNER=PTT 納入配對與 Balance；非 PTT 不填 Code、不計平衡"),
+        ("U-Stock-02", "主檔 RD004", "必要", "Material Code 來自 RD004（Act order + Balance sheet）；一 Code 對一 Common Group"),
+        ("U-Stock-03", "配對主鍵", "必要", "1.Common Group 2.厚度T 3.寬度W；MS004 無原生 Code，需 allocate 貼上"),
+        ("U-Stock-04", "MAT SPEC 跨規格", "對照", "實際 MAT SPEC 可與 Code 前綴不同，同 RD004 群組即可（見 MAT SPEC對照表）"),
+        ("U-Stock-05", "尾碼 _Common", "尾碼", "跨客戶共通備貨池；同 Code 多列加總進 Balance"),
+        ("U-Stock-06", "尾碼 Maker", "尾碼", "依 MAKER CODE 區分，例：_CHINA STEEL、_SSI、_BAOSHAN"),
+        ("U-Stock-07", "尾碼 _CASH", "尾碼", "非標準寬度或現金採購，例：SPHC-P/O_2.6_1086_CASH"),
+        ("U-Stock-08", "厚度容差", "容差", "0.55→0.5、3.02→3、0.75→0.7；建議 round(T,1) 或依 RD004"),
+        ("U-Stock-09", "寬度容差", "容差", "Coil 共通料 Code 常固定 1219；實際 W 1270/1225/1200/1195/1260 可同碼"),
+        ("U-Stock-10", "客戶專料", "排除", "專案專購 CUST CODE 特定客戶 → Material Code 留空（約85~90% PTT列）"),
+        ("U-Stock-11", "Allocate 方式", "作業", "手動貼上/向下複製，非公式；約600~800列有 Code（10~15%）"),
+        ("U-Stock-12", "同 Code 合併", "加總", "相同 Material Code 之 P REMAIN WT 加總 → Balance 期初現貨（噸）"),
+        ("U-Stock-13", "Balance 對應", "對應", "群組型 Code 與 Balance 重疊約88~100%；另有尺寸型命名"),
+        ("U-Stock-14", "不納入配對", "排除", "OWNER≠PTT、Code空白、Code=0、REMAIN WT=0 等（見排除清單）"),
+        ("U-Stock-15", "CARRIER 例外", "例外", "無 Material Code 欄；改用 Master list G00料號+Spec+T+W+L"),
+    ]
+    return {
+        "配對規則清單": pd.DataFrame(rules, columns=["規則編號", "規則名稱", "類別", "規則內容"]),
+        "MAT SPEC對照": pd.DataFrame([
+            {"MS004_MAT_SPEC": k, "配對_Code前綴": v, "備註": "同 Common Group" if k == "SPCC" else ""}
+            for k, v in DEFAULT_SPEC_MAP.items()
+        ]),
+        "Code命名格式": pd.DataFrame([
+            {"格式類型": "格式 A（現行，2026-02起）", "結構": "{Common_Group}_{厚度}_{寬度}_{尾碼}", "範例": "SPCC-SD_0.6_1219_Common"},
+            {"格式類型": "格式 B（2026-01 Original material code）", "結構": "{MAT SPEC}_{T}_{W}_0_{Maker或PTT}", "範例": "CR_2.2_1219_0_PTT"},
+        ]),
+        "排除情況": pd.DataFrame([
+            {"情況": "OWNER ≠ PTT", "處理": "排除，不填 Material Code"},
+            {"情況": "Material Code 空白", "處理": "不計入 Balance（專料或待處理）"},
+            {"情況": "Material Code = 0", "處理": "視為未配對（01月常見）"},
+            {"情況": "P REMAIN WT = 0", "處理": "可保留列但重量不計"},
+            {"情況": "CUST CODE 為專案客戶（如 MING TAI）", "處理": "通常不配碼"},
+        ]),
+        "配對流程": pd.DataFrame([
+            {"步驟": 1, "動作": "MS004 匯出 → Stock 頁"},
+            {"步驟": 2, "動作": "檢查 OWNER = PTT？否 → 跳過"},
+            {"步驟": 3, "動作": "查 RD004 Common Group（Spec + T [+ W]）"},
+            {"步驟": 4, "動作": "是否專案專料（CUST CODE）？是 → Material Code 留空"},
+            {"步驟": 5, "動作": "決定尾碼（Common / Maker / CASH）"},
+            {"步驟": 6, "動作": "填入 A 欄 Material Code（手動 allocate）"},
+            {"步驟": 7, "動作": "同 Code 之 P REMAIN WT 加總 → Balance 表期初現貨"},
+        ]),
+    }
 
 
 def load_matching_rules(rules_path: Path | None = None) -> dict:
