@@ -13,6 +13,7 @@ BASE_DIR = Path(__file__).resolve().parent
 SAMPLE_DIR = BASE_DIR / "Sample Balance"
 STOCK_DIR = BASE_DIR / "Stock"
 SA007_DIR = BASE_DIR / "SA007"
+SO003_DIR = BASE_DIR / "SO003"
 FORECAST_DIR = BASE_DIR / "Forecast"
 FORECAST_DIR_LEGACY = BASE_DIR / "Froecast"
 OUTPUT_DIR = BASE_DIR / "Output"
@@ -91,6 +92,24 @@ def resolve_sa007_paths() -> list[Path]:
     return sorted(paths, key=lambda p: p.stat().st_mtime)
 
 
+def resolve_so003_paths() -> list[Path]:
+    """All SO003 order exports under SO003/ (newest last)."""
+    if not SO003_DIR.is_dir():
+        return []
+    paths: list[Path] = []
+    for pattern in ("SO003*.xlsx", "SO003*.xls", "*.xlsx", "*.xls"):
+        paths.extend(SO003_DIR.glob(pattern))
+    paths = [p for p in paths if not is_carrier_path(p)]
+    # de-dup while preserving order
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for p in sorted(paths, key=lambda x: x.stat().st_mtime):
+        if p not in seen:
+            seen.add(p)
+            unique.append(p)
+    return unique
+
+
 def discover_file(
     patterns: list[str],
     search_dirs: list[Path] | None = None,
@@ -98,7 +117,7 @@ def discover_file(
     exclude_carrier: bool = True,
 ) -> Path | None:
     """Return newest matching file across search directories."""
-    search_dirs = search_dirs or [SAMPLE_DIR, resolve_forecast_dir(), SA007_DIR, BASE_DIR]
+    search_dirs = search_dirs or [SAMPLE_DIR, resolve_forecast_dir(), SA007_DIR, SO003_DIR, BASE_DIR]
     matches: list[Path] = []
     for directory in search_dirs:
         if not directory.exists():
@@ -351,11 +370,39 @@ def load_ms004(stock_path: Path | None = None) -> pd.DataFrame:
     return exclude_carrier_rows(out)
 
 
-def load_so003(sample_path: Path | None = None) -> pd.DataFrame:
-    """Load SO003 from Sample Balance workbook (Carrier sources excluded)."""
+def _read_so003_workbook(path: Path) -> pd.DataFrame:
+    xl = pd.ExcelFile(path)
+    sheet = xl.sheet_names[0]
+    for name in xl.sheet_names:
+        upper = name.strip().upper()
+        if upper == "SO003" or upper.startswith("SO003"):
+            sheet = name
+            break
+    raw = pd.read_excel(path, sheet_name=sheet, header=None)
+    return _parse_so003_raw(raw, source=path.name)
+
+
+def _load_so003_from_sample_fallback(sample_path: Path | None = None) -> pd.DataFrame:
     sample_path = sample_path or resolve_sample_path()
     raw = pd.read_excel(sample_path, sheet_name="SO003", header=None)
-    return exclude_carrier_rows(_parse_so003_raw(raw, source=sample_path.name))
+    return _parse_so003_raw(raw, source=sample_path.name)
+
+
+def load_so003(sample_path: Path | None = None) -> pd.DataFrame:
+    """Load SO003 open orders from SO003/ folder (Carrier excluded)."""
+    frames: list[pd.DataFrame] = []
+    for path in resolve_so003_paths():
+        try:
+            part = _read_so003_workbook(path)
+            if not part.empty:
+                frames.append(part)
+        except Exception:
+            continue
+    if frames:
+        df = pd.concat(frames, ignore_index=True)
+    else:
+        df = _load_so003_from_sample_fallback(sample_path)
+    return exclude_carrier_rows(df)
 
 
 def _resolve_mp008_sheet(workbook: Path) -> str:
@@ -469,7 +516,7 @@ def load_penta_schedule_forecast() -> pd.DataFrame:
             "*PENTA*Schedule*WK*25*",
             "*Schedule*wk*25*",
         ],
-        [SAMPLE_DIR, FORECAST_DIR, BASE_DIR],
+        [SAMPLE_DIR, resolve_forecast_dir(), BASE_DIR],
     )
 
     frames: list[pd.DataFrame] = []
@@ -930,11 +977,13 @@ def get_data_source_summary() -> dict[str, str]:
 
     rules_path = resolve_rules_path()
     sa007_paths = resolve_sa007_paths()
+    so003_paths = resolve_so003_paths()
     fc_dir = resolve_forecast_dir()
     sa007_label = ", ".join(p.name for p in sa007_paths) if sa007_paths else f"{SA007_DIR.name}/ (empty → Sample Balance fallback)"
+    so003_label = ", ".join(p.name for p in so003_paths) if so003_paths else f"{SO003_DIR.name}/ (empty → Sample Balance fallback)"
     return {
         "sample_balance": str(resolve_sample_path().name),
-        "so003": f"{resolve_sample_path().name} (SO003 sheet; Carrier excluded)",
+        "so003": f"{so003_label} (Carrier excluded)",
         "ms004": f"{resolve_stock_path().name} (Carrier excluded)",
         "mp008": (
             f"{(discover_file(['MP008*.xlsx', 'MP008*.xls'], [SAMPLE_DIR, BASE_DIR]) or resolve_sample_path()).name}"

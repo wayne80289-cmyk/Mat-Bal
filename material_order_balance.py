@@ -449,7 +449,7 @@ def run_full_pipeline(target_months: list[str] | None = None) -> pd.DataFrame:
         future_plan.to_excel(writer, sheet_name="期貨備貨計畫", index=False)
         result.to_excel(writer, sheet_name="Balance", index=False)
         shortage.to_excel(writer, sheet_name="Order Required", index=False)
-        so003.to_excel(writer, sheet_name="SO003_Source", index=False)
+        so003.to_excel(writer, sheet_name="SO003", index=False)
         mp008.to_excel(writer, sheet_name="MP008_OnWay", index=False)
         cleaned_stock.to_excel(writer, sheet_name="MS004_Allocatable_Stock", index=False)
         client_forecast.to_excel(writer, sheet_name="Forecast", index=False)
