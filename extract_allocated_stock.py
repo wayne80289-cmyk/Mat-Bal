@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Extract all Stock rows with Material Code filled across History Balance months."""
+"""Extract Stock rows with Material Code from History Balance template workbooks (sample tooling only)."""
 
 from datetime import datetime
 from pathlib import Path

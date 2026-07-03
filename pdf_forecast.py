@@ -397,12 +397,17 @@ def parse_pdf_forecast(path: Path) -> pd.DataFrame:
     return pd.DataFrame()
 
 
-def load_pdf_forecasts(forecast_dir: Path) -> pd.DataFrame:
+def load_pdf_forecast_vendor_detail(forecast_dir: Path) -> pd.DataFrame:
+    """Per-PDF rows with Source_File; not grouped (partial customer forecasts)."""
     frames = []
     for path in sorted(forecast_dir.glob("*.pdf")):
+        if "CARRIER" in path.name.upper():
+            continue
         try:
             part = parse_pdf_forecast(path)
             if not part.empty:
+                part = part.copy()
+                part["Source_File"] = path.name
                 frames.append(part)
                 print(f"  Parsed PDF {path.name}: {len(part)} rows")
             else:
@@ -411,7 +416,13 @@ def load_pdf_forecasts(forecast_dir: Path) -> pd.DataFrame:
             print(f"  Warning: failed PDF {path.name}: {exc}")
     if not frames:
         return pd.DataFrame()
-    all_fc = pd.concat(frames, ignore_index=True)
+    return pd.concat(frames, ignore_index=True)
+
+
+def load_pdf_forecasts(forecast_dir: Path) -> pd.DataFrame:
+    all_fc = load_pdf_forecast_vendor_detail(forecast_dir)
+    if all_fc.empty:
+        return pd.DataFrame()
     month_cols = [m for m in MONTHS_BALANCE if m in all_fc.columns]
     if not month_cols:
         return pd.DataFrame()

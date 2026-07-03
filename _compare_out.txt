@@ -1,0 +1,7 @@
+﻿row 0 ['Cutting Flag', nan, nan, nan, nan, nan, nan, nan, nan, np.float64(nan), np.float64(nan), np.float64(nan), nan, np.float64(nan), np.float64(nan), np.float64(nan), np.float64(nan), nan]
+row 1 [nan, nan, nan, nan, nan, nan, nan, nan, nan, np.float64(nan), np.float64(nan), np.float64(nan), nan, np.float64(nan), np.float64(nan), np.float64(0.0), np.float64(592.0), nan]
+row 2 [nan, nan, nan, nan, nan, nan, nan, 'Values', 'Month', np.float64(nan), np.float64(nan), np.float64(nan), nan, np.float64(nan), np.float64(nan), np.float64(nan), np.float64(nan), nan]
+row 3 [nan, nan, nan, nan, nan, nan, nan, 'Sum of Qty', nan, np.float64(nan), np.float64(nan), np.float64(nan), 'Sum of Weight', np.float64(nan), np.float64(nan), np.float64(nan), np.float64(nan), 'Total Sum of Qty']
+row 4 ['Customer', 'Delivery Place', 'FG Code', 'DO Mat Spec', 'T', 'W', 'L', 1, 2, np.float64(3.0), np.float64(4.0), np.float64(5.0), 1, np.float64(2.0), np.float64(3.0), np.float64(4.0), np.float64(5.0), nan]
+Act order rows with 3mo sales: 306
+SA007 rows with wt in cols 12-14: 657

@@ -20,7 +20,8 @@ from openpyxl.utils import get_column_letter
 BASE_DIR = Path(__file__).resolve().parent
 SAMPLE_PATH = BASE_DIR / "Sample Balance" / "All Customer review Jun '2026 review 20.06.2026.xlsx"
 STOCK_PATH = BASE_DIR / "Stock" / "MS004-260619.xls"
-FORECAST_DIR = BASE_DIR / "Froecast"
+FORECAST_DIR = BASE_DIR / "Forecast"
+FORECAST_DIR_LEGACY = BASE_DIR / "Froecast"
 OUTPUT_DIR = BASE_DIR / "Output"
 
 MONTHS_SALES = [
@@ -143,10 +144,11 @@ def load_balance_materials(sample_path: Path) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def load_act_order_mapping(sample_path: Path) -> dict[tuple, str]:
-    act = pd.read_excel(sample_path, sheet_name="Act order", header=None)
+def load_sa007_history_mapping(sample_path: Path) -> dict[tuple, str]:
+    """Material spec+T+W → Material Code from Sample Balance SA007歷史銷售紀錄工作表（legacy fallback）。"""
+    sa007_legacy = pd.read_excel(sample_path, sheet_name="Act order", header=None)
     mapping: dict[tuple, str] = {}
-    for _, row in act.iloc[4:].iterrows():
+    for _, row in sa007_legacy.iloc[4:].iterrows():
         code = row[0]
         spec = row[1]
         t = row[8]
@@ -156,6 +158,11 @@ def load_act_order_mapping(sample_path: Path) -> dict[tuple, str]:
         key = (normalize_spec(spec), num(t), num(w))
         mapping[key] = normalize_text(code)
     return mapping
+
+
+def load_act_order_mapping(sample_path: Path) -> dict[tuple, str]:
+    """Deprecated alias for load_sa007_history_mapping()."""
+    return load_sa007_history_mapping(sample_path)
 
 
 def spec_matches(stock_spec: str, target_spec: str) -> bool:
@@ -327,29 +334,41 @@ def parse_plant1410_forecast(path: Path) -> pd.DataFrame:
     return pd.DataFrame(records)
 
 
-def load_forecast(forecast_dir: Path) -> pd.DataFrame:
-    from pdf_forecast import load_pdf_forecasts
+def load_forecast_vendor_detail(forecast_dir: Path) -> pd.DataFrame:
+    """Load each Forecast/ vendor file separately (partial customers only, U1)."""
+    from pdf_forecast import load_pdf_forecast_vendor_detail
 
-    frames = []
+    frames: list[pd.DataFrame] = []
     for path in sorted(forecast_dir.glob("*.xlsx")):
+        if "CARRIER" in path.name.upper():
+            continue
         try:
             if "CPK" in path.name.upper():
                 part = parse_cpk_forecast(path)
             else:
                 part = parse_plant1410_forecast(path)
             if not part.empty:
+                part = part.copy()
+                part["Source_File"] = path.name
                 frames.append(part)
                 print(f"  Parsed {path.name}: {len(part)} rows")
         except Exception as exc:
             print(f"Warning: failed to read {path.name}: {exc}")
 
-    pdf_fc = load_pdf_forecasts(forecast_dir)
+    pdf_fc = load_pdf_forecast_vendor_detail(forecast_dir)
     if not pdf_fc.empty:
         frames.append(pdf_fc)
 
     if not frames:
         return pd.DataFrame()
-    all_fc = pd.concat(frames, ignore_index=True)
+    return pd.concat(frames, ignore_index=True)
+
+
+def load_forecast(forecast_dir: Path) -> pd.DataFrame:
+    """Merge Forecast/ vendor files (partial customers); kg/month by material_code."""
+    all_fc = load_forecast_vendor_detail(forecast_dir)
+    if all_fc.empty:
+        return pd.DataFrame()
     month_cols = [m for m in MONTHS_BALANCE if m in all_fc.columns]
     if not month_cols:
         return pd.DataFrame()
@@ -601,7 +620,9 @@ def main():
     print(f"  Materials with stock: {stocked}")
 
     print("Loading forecast...")
-    forecast_df = load_forecast(FORECAST_DIR)
+    from data_loaders import resolve_forecast_dir
+
+    forecast_df = load_forecast(resolve_forecast_dir())
     if forecast_df.empty:
         print("  No xlsx forecast parsed, using sample forecast...")
         forecast_df = load_sample_forecast(SAMPLE_PATH)
