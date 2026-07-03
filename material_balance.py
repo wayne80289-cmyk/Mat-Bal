@@ -20,7 +20,8 @@ from openpyxl.utils import get_column_letter
 BASE_DIR = Path(__file__).resolve().parent
 SAMPLE_PATH = BASE_DIR / "Sample Balance" / "All Customer review Jun '2026 review 20.06.2026.xlsx"
 STOCK_PATH = BASE_DIR / "Stock" / "MS004-260619.xls"
-FORECAST_DIR = BASE_DIR / "Froecast"
+FORECAST_DIR = BASE_DIR / "Forecast"
+FORECAST_DIR_LEGACY = BASE_DIR / "Froecast"
 OUTPUT_DIR = BASE_DIR / "Output"
 
 MONTHS_SALES = [
@@ -603,7 +604,9 @@ def main():
     print(f"  Materials with stock: {stocked}")
 
     print("Loading forecast...")
-    forecast_df = load_forecast(FORECAST_DIR)
+    from data_loaders import resolve_forecast_dir
+
+    forecast_df = load_forecast(resolve_forecast_dir())
     if forecast_df.empty:
         print("  No xlsx forecast parsed, using sample forecast...")
         forecast_df = load_sample_forecast(SAMPLE_PATH)

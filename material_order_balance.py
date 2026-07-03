@@ -22,7 +22,8 @@ from data_loaders import (
     load_ms004,
     load_order_history,
     load_rd004_master,
-    load_sa006_sales,
+    load_sa007_act_order_detail,
+    load_sa007_sales,
     load_so003,
 )
 from stock_matching import (
@@ -390,6 +391,7 @@ def run_full_pipeline(target_months: list[str] | None = None) -> pd.DataFrame:
     sources = get_data_source_summary()
     print("=== Penta Thick 現貨/期貨整合計畫系統 ===")
     print("分析範圍: 不含 Carrier 客戶（僅其他客戶訂單）")
+    print("需求資料: Forecast/ 預估表 + SA007/ 實際銷售平均（無預估時）")
     print("資料來源:")
     for k, v in sources.items():
         print(f"  {k}: {v}")
@@ -400,16 +402,18 @@ def run_full_pipeline(target_months: list[str] | None = None) -> pd.DataFrame:
     mp008_raw = load_mp008()
     order_history = load_order_history()
     client_forecast = load_client_forecast(target_months)
-    sa006_raw = load_sa006_sales()
-    sa006_materials = aggregate_sa006_by_material(sa006_raw, rd004)
+    sa007_raw = load_sa007_sales()
+    sa007_materials = aggregate_sa006_by_material(sa007_raw, rd004)
+    sa007_detail = load_sa007_act_order_detail()
 
     engine = MaterialOrderBalanceSystem()
     print(f"\n  RD004 materials: {len(rd004)}")
     print(f"  MS004 PTT stock rows: {len(ms004)}")
     print(f"  SO003 order rows: {len(so003)}")
-    print(f"  SA006/SA007 sales rows (3mo): {len(sa006_raw)} → {len(sa006_materials)} materials")
+    print(f"  SA007 actual sales rows: {len(sa007_detail)} (3mo pivot: {len(sa007_raw)} → {len(sa007_materials)} materials)")
+    print(f"  Forecast materials: {len(client_forecast)}")
     forecast_map = engine.integrate_sales_forecast(
-        client_forecast, order_history, target_months, sa006_by_material=sa006_materials
+        client_forecast, order_history, target_months, sa006_by_material=sa007_materials
     )
     so_summary = engine.process_so003_orders(so003)
     cleaned_stock = engine.clean_and_allocate_stock(ms004, rd004)
@@ -418,14 +422,13 @@ def run_full_pipeline(target_months: list[str] | None = None) -> pd.DataFrame:
 
     print(f"  Open PO rows (allocatable): {len(active_po)}")
     print(f"  Allocatable stock materials: {len(cleaned_stock)}")
-    print(f"  Forecast materials: {len(client_forecast)}")
 
     result = engine.run_material_balance(
         cleaned_stock, active_po, forecast_map, so_summary, rd004, target_months
     )
 
-    spot_plan = build_spot_urgent_plan(result, so003, rd004, sa006_materials, target_months)
-    future_plan = build_futures_stocking_plan(result, rd004, sa006_materials, target_months)
+    spot_plan = build_spot_urgent_plan(result, so003, rd004, sa007_materials, target_months)
+    future_plan = build_futures_stocking_plan(result, rd004, sa007_materials, target_months)
 
     material_master = enrich_material_master(
         rd004,
@@ -449,8 +452,9 @@ def run_full_pipeline(target_months: list[str] | None = None) -> pd.DataFrame:
         so003.to_excel(writer, sheet_name="SO003_Source", index=False)
         mp008.to_excel(writer, sheet_name="MP008_OnWay", index=False)
         cleaned_stock.to_excel(writer, sheet_name="MS004_Allocatable_Stock", index=False)
-        client_forecast.to_excel(writer, sheet_name="Forecast_Source", index=False)
-        sa006_materials.to_excel(writer, sheet_name="SA006_近3月銷售", index=False)
+        client_forecast.to_excel(writer, sheet_name="Forecast", index=False)
+        sa007_detail.to_excel(writer, sheet_name="SA007", index=False)
+        sa007_materials.to_excel(writer, sheet_name="SA007_近3月彙總", index=False)
         source_rows.to_excel(writer, sheet_name="Data Sources", index=False)
         material_master.to_excel(writer, sheet_name="Material Master", index=False)
         for sheet_name, sheet_df in rules_sheets.items():
@@ -459,8 +463,8 @@ def run_full_pipeline(target_months: list[str] | None = None) -> pd.DataFrame:
 
     print(f"\nReport saved: {out_path}")
     print(f"  Balance materials: {len(result)}")
-    print(f"  現貨緊急調貨 (SA006×近2月): {len(spot_plan)} 項")
-    print(f"  期貨備貨計畫 (SA006×第3-5月): {len(future_plan)} 項")
+    print(f"  現貨緊急調貨 (SA007×近2月): {len(spot_plan)} 項")
+    print(f"  期貨備貨計畫 (SA007×第3-5月): {len(future_plan)} 項")
     print(f"  Material Master (rules: {resolve_rules_path().name}): {len(material_master)} 項")
     return result
 

@@ -12,7 +12,9 @@ import pandas as pd
 BASE_DIR = Path(__file__).resolve().parent
 SAMPLE_DIR = BASE_DIR / "Sample Balance"
 STOCK_DIR = BASE_DIR / "Stock"
-FORECAST_DIR = BASE_DIR / "Froecast"
+SA007_DIR = BASE_DIR / "SA007"
+FORECAST_DIR = BASE_DIR / "Forecast"
+FORECAST_DIR_LEGACY = BASE_DIR / "Froecast"
 OUTPUT_DIR = BASE_DIR / "Output"
 
 SAMPLE_PATH = SAMPLE_DIR / "All Customer review Jun '2026 review 20.06.2026.xlsx"
@@ -71,6 +73,24 @@ def exclude_carrier_rows(df: pd.DataFrame) -> pd.DataFrame:
     return df.loc[~mask].copy()
 
 
+def resolve_forecast_dir() -> Path:
+    """Primary: Forecast/ folder; fallback Froecast/ for legacy layouts."""
+    if FORECAST_DIR.is_dir() and any(FORECAST_DIR.iterdir()):
+        return FORECAST_DIR
+    return FORECAST_DIR_LEGACY
+
+
+def resolve_sa007_paths() -> list[Path]:
+    """All SA007 sales workbooks under SA007/ (newest last)."""
+    if not SA007_DIR.is_dir():
+        return []
+    paths: list[Path] = []
+    for pattern in ("*.xlsx", "*.xls"):
+        paths.extend(SA007_DIR.glob(pattern))
+    paths = [p for p in paths if not is_carrier_path(p)]
+    return sorted(paths, key=lambda p: p.stat().st_mtime)
+
+
 def discover_file(
     patterns: list[str],
     search_dirs: list[Path] | None = None,
@@ -78,7 +98,7 @@ def discover_file(
     exclude_carrier: bool = True,
 ) -> Path | None:
     """Return newest matching file across search directories."""
-    search_dirs = search_dirs or [SAMPLE_DIR, FORECAST_DIR, BASE_DIR]
+    search_dirs = search_dirs or [SAMPLE_DIR, resolve_forecast_dir(), SA007_DIR, BASE_DIR]
     matches: list[Path] = []
     for directory in search_dirs:
         if not directory.exists():
@@ -462,7 +482,7 @@ def load_penta_schedule_forecast() -> pd.DataFrame:
         sample_fc["Source"] = "Sample Balance Forecast"
         frames.append(sample_fc)
 
-    vendor_fc = load_client_forecast_from_froecast()
+    vendor_fc = load_client_forecast()
     if not vendor_fc.empty:
         vendor_fc = vendor_fc.copy()
         vendor_fc["Source"] = "Froecast"
@@ -550,17 +570,19 @@ def _parse_penta_schedule(path: Path) -> pd.DataFrame:
     return out
 
 
-def load_client_forecast_from_froecast(target_months: list[str] | None = None) -> pd.DataFrame:
+def load_client_forecast(target_months: list[str] | None = None) -> pd.DataFrame:
+    """Client forecast from Forecast/ folder (vendor xlsx + pdf)."""
     import contextlib
     import io
 
     from material_balance import load_forecast
 
     target_months = target_months or TARGET_MONTHS
+    fc_dir = resolve_forecast_dir()
     with contextlib.redirect_stdout(io.StringIO()):
-        fc = load_forecast(FORECAST_DIR)
+        fc = load_forecast(fc_dir)
     if fc.empty:
-        return pd.DataFrame(columns=["Material_Code", *target_months])
+        return pd.DataFrame(columns=["Material_Code", *target_months, "Forecast_Source"])
 
     records = []
     for _, row in fc.iterrows():
@@ -570,34 +592,160 @@ def load_client_forecast_from_froecast(target_months: list[str] | None = None) -
             rec[ym] = _num(row.get(short, 0)) / 1000.0
         records.append(rec)
     df = pd.DataFrame(records)
-    return df.groupby("Material_Code", as_index=False).sum(numeric_only=True)
+    if df.empty:
+        return pd.DataFrame(columns=["Material_Code", *target_months, "Forecast_Source"])
+    month_cols = [m for m in target_months if m in df.columns]
+    grouped = df.groupby("Material_Code", as_index=False)[month_cols].sum()
+    grouped["Forecast_Source"] = fc_dir.name
+    grouped["Source"] = "Forecast"
+    return grouped
 
 
-def load_client_forecast(target_months: list[str] | None = None) -> pd.DataFrame:
-    """Unified forecast: PENTA Schedule wk25 + Sample Balance + Froecast."""
-    return load_penta_schedule_forecast()
+def _detect_sa007_workbook_format(raw: pd.DataFrame) -> str:
+    """act_order = Material Code monthly layout; pivot = Customer/FG weight pivot."""
+    for ri in (2, 4):
+        if ri >= len(raw):
+            continue
+        line = " ".join(_text(v).lower() for v in raw.iloc[ri].tolist()[:10])
+        if "material code" in line:
+            return "act_order"
+        if "customer" in line and "fg code" in line:
+            return "pivot"
+    return "act_order"
+
+
+def _parse_sa007_act_order_style(
+    raw: pd.DataFrame,
+    source_file: str,
+    source_sheet: str = "SA007",
+) -> pd.DataFrame:
+    """
+    Act-order style actual sales (Material Code + FG + monthly kg).
+    Used by SA007/ folder exports; replaces Sample Balance Act order sheet.
+    """
+    rows = []
+    for i in range(4, len(raw)):
+        row = raw.iloc[i]
+        fg = row[3]
+        if pd.isna(fg) or not _text(fg):
+            continue
+        rows.append({
+            "Material_Code": _text(row[0]),
+            "FG_Code": _text(fg),
+            "Customer": _text(row[4]),
+            "Spec": _text(row[1]),
+            "Mat_Spec": _text(row[7]) if len(row) > 7 else _text(row[1]),
+            "Thickness": _num(row[8]) if len(row) > 8 else 0.0,
+            "Width": _num(row[9]) if len(row) > 9 else 0.0,
+            "M-1": _num(row[25]) if len(row) > 25 else 0.0,
+            "M-2": _num(row[24]) if len(row) > 24 else 0.0,
+            "M-3": _num(row[23]) if len(row) > 23 else 0.0,
+            "Source_File": source_file,
+            "Source_Sheet": source_sheet,
+            "Source_Format": "act_order",
+        })
+    return pd.DataFrame(rows)
+
+
+def _read_sa007_workbook(path: Path) -> pd.DataFrame:
+    xl = pd.ExcelFile(path)
+    sheet = xl.sheet_names[0]
+    for name in xl.sheet_names:
+        upper = name.strip().upper()
+        if upper.startswith("SA007") or upper.startswith("SA006"):
+            sheet = name
+            break
+    raw = pd.read_excel(path, sheet_name=sheet, header=None)
+    fmt = _detect_sa007_workbook_format(raw)
+    if fmt == "pivot":
+        return _parse_sa007_sales(raw, path.name)
+    return _parse_sa007_act_order_style(raw, path.name, sheet)
+
+
+def _load_sa007_from_sample_fallback() -> pd.DataFrame:
+    """Fallback when SA007/ folder is empty: Sample Balance SA007 pivot or Act order."""
+    sample_path = resolve_sample_path()
+    try:
+        sheet = _resolve_sa_sales_sheet(sample_path)
+        raw = pd.read_excel(sample_path, sheet_name=sheet, header=None)
+        if sheet.strip().upper() == "SA006":
+            return _parse_sa006_sheet(raw, sample_path.name)
+        return _parse_sa007_sales(raw, sample_path.name)
+    except ValueError:
+        pass
+    try:
+        act = pd.read_excel(sample_path, sheet_name="Act order", header=None)
+        return _parse_sa007_act_order_style(act, sample_path.name, "Act order")
+    except Exception:
+        return pd.DataFrame()
+
+
+def _normalize_sa007_sales_to_pivot(df: pd.DataFrame) -> pd.DataFrame:
+    """Unify act_order rows to pivot-style columns for aggregation."""
+    if df.empty:
+        return df
+    if "M-3_kg" in df.columns:
+        return df
+    rows = []
+    for _, row in df.iterrows():
+        m1 = _num(row.get("M-1"))
+        m2 = _num(row.get("M-2"))
+        m3 = _num(row.get("M-3"))
+        if m1 + m2 + m3 <= 0:
+            continue
+        spec = _text(row.get("Mat_Spec")) or _text(row.get("Spec"))
+        rows.append({
+            "Customer": _text(row.get("Customer")),
+            "Delivery_Place": _text(row.get("Customer")),
+            "FG_Code": _text(row.get("FG_Code")),
+            "Spec": spec,
+            "Thickness": _num(row.get("Thickness")),
+            "Width": _num(row.get("Width")),
+            "M-3_kg": m3,
+            "M-2_kg": m2,
+            "M-1_kg": m1,
+            "Total_3mo_kg": m1 + m2 + m3,
+            "Source_Sheet": _text(row.get("Source_Sheet", "SA007")),
+            "Source_File": _text(row.get("Source_File")),
+        })
+    return pd.DataFrame(rows)
+
+
+def load_sa007_act_order_detail() -> pd.DataFrame:
+    """Raw SA007 actual sales rows (Act order layout) for report export."""
+    frames: list[pd.DataFrame] = []
+    for path in resolve_sa007_paths():
+        try:
+            xl = pd.ExcelFile(path)
+            sheet = xl.sheet_names[0]
+            for name in xl.sheet_names:
+                if "SA007" in name.upper() or "SA006" in name.upper():
+                    sheet = name
+                    break
+            raw = pd.read_excel(path, sheet_name=sheet, header=None)
+            if _detect_sa007_workbook_format(raw) == "act_order":
+                part = _parse_sa007_act_order_style(raw, path.name, sheet)
+                if not part.empty:
+                    frames.append(part)
+        except Exception:
+            continue
+    if frames:
+        return exclude_carrier_rows(pd.concat(frames, ignore_index=True))
+    sample_path = resolve_sample_path()
+    try:
+        act = pd.read_excel(sample_path, sheet_name="Act order", header=None)
+        return exclude_carrier_rows(_parse_sa007_act_order_style(act, sample_path.name, "Act order"))
+    except Exception:
+        return pd.DataFrame()
 
 
 def load_order_history(sample_path: Path | None = None) -> pd.DataFrame:
-    """U7 fallback: Act order M-1/M-2/M-3 (kg) by FG_Code."""
-    sample_path = sample_path or resolve_sample_path()
-    act = pd.read_excel(sample_path, sheet_name="Act order", header=None)
-    rows = []
-    for _, row in act.iloc[4:].iterrows():
-        fg = row[3]
-        if pd.isna(fg):
-            continue
-        rows.append({
-            "FG_Code": _text(fg),
-            "Material_Code": _text(row[0]),
-            "M-1": _num(row[25]),
-            "M-2": _num(row[24]),
-            "M-3": _num(row[23]),
-        })
-    df = pd.DataFrame(rows)
-    if df.empty:
-        return df
-    return df.groupby("FG_Code", as_index=False).agg({
+    """U7: mean(M-1,M-2,M-3)/1000 ton from SA007/ folder actual sales."""
+    del sample_path  # legacy arg; SA007 folder is canonical
+    detail = load_sa007_act_order_detail()
+    if detail.empty:
+        return pd.DataFrame(columns=["FG_Code", "Material_Code", "M-1", "M-2", "M-3"])
+    return detail.groupby("FG_Code", as_index=False).agg({
         "Material_Code": "first",
         "M-1": "sum",
         "M-2": "sum",
@@ -652,20 +800,37 @@ def _parse_sa006_sheet(raw: pd.DataFrame, source: str) -> pd.DataFrame:
     return _parse_sa007_sales(raw, source).assign(Source_Sheet="SA006")
 
 
-def load_sa006_sales(sample_path: Path | None = None) -> pd.DataFrame:
+def load_sa007_sales(sa007_dir: Path | None = None) -> pd.DataFrame:
     """
-    Load last-3-month actual sales (kg) for plan universe.
-    Prefers SA006 sheet; falls back to SA007 (same layout in Sample Balance).
-    Carrier customers excluded.
+    Actual sales history (近 3 月) from SA007/ folder.
+    Replaces Sample Balance Act order / SA007 sheet for analysis.
     """
-    sample_path = sample_path or resolve_sample_path()
-    sheet = _resolve_sa_sales_sheet(sample_path)
-    raw = pd.read_excel(sample_path, sheet_name=sheet, header=None)
-    if sheet.strip().upper() == "SA006":
-        df = _parse_sa006_sheet(raw, sample_path.name)
+    frames: list[pd.DataFrame] = []
+    paths = resolve_sa007_paths() if sa007_dir is None else sorted(
+        [p for p in sa007_dir.glob("*.xlsx")] + [p for p in sa007_dir.glob("*.xls")],
+        key=lambda p: p.stat().st_mtime,
+    )
+    for path in paths:
+        if is_carrier_path(path):
+            continue
+        try:
+            part = _read_sa007_workbook(path)
+            if not part.empty:
+                frames.append(part)
+        except Exception:
+            continue
+    if not frames:
+        combined = _load_sa007_from_sample_fallback()
     else:
-        df = _parse_sa007_sales(raw, sample_path.name)
-    return exclude_carrier_rows(df)
+        combined = pd.concat(frames, ignore_index=True)
+    combined = _normalize_sa007_sales_to_pivot(combined)
+    return exclude_carrier_rows(combined)
+
+
+def load_sa006_sales(sample_path: Path | None = None) -> pd.DataFrame:
+    """Alias: actual sales from SA007/ folder."""
+    del sample_path
+    return load_sa007_sales()
 
 
 def build_fg_to_material_map(rd004: pd.DataFrame) -> dict[str, str]:
@@ -763,8 +928,10 @@ def get_data_source_summary() -> dict[str, str]:
     """Report which source files were resolved (Carrier sources excluded)."""
     from stock_matching import resolve_rules_path
 
-    schedule = discover_file(["*PENTA*Schedule*wk*25*", "*Schedule*wk*25*"], [SAMPLE_DIR, FORECAST_DIR])
     rules_path = resolve_rules_path()
+    sa007_paths = resolve_sa007_paths()
+    fc_dir = resolve_forecast_dir()
+    sa007_label = ", ".join(p.name for p in sa007_paths) if sa007_paths else f"{SA007_DIR.name}/ (empty → Sample Balance fallback)"
     return {
         "sample_balance": str(resolve_sample_path().name),
         "so003": f"{resolve_sample_path().name} (SO003 sheet; Carrier excluded)",
@@ -773,14 +940,8 @@ def get_data_source_summary() -> dict[str, str]:
             f"{(discover_file(['MP008*.xlsx', 'MP008*.xls'], [SAMPLE_DIR, BASE_DIR]) or resolve_sample_path()).name}"
             " (Carrier excluded)"
         ),
-        "forecast": (
-            f"{schedule.name} + Sample Balance + Froecast (Carrier excluded)"
-            if schedule
-            else "Sample Balance Forecast + Froecast (Carrier excluded)"
-        ),
-        "sa006_sales": (
-            f"{resolve_sample_path().name} (SA006/SA007 近3月銷售; Carrier excluded)"
-        ),
+        "forecast": f"{fc_dir.name}/ (客戶預估表; Carrier excluded)",
+        "sa007_sales": f"{sa007_label} (實際歷史銷售; Carrier excluded)",
         "stock_matching_rules": rules_path.name if rules_path.exists() else f"{rules_path.name} (embedded defaults)",
         "scope": "不含 Carrier 客戶（本系統僅分析其他客戶訂單）",
     }
