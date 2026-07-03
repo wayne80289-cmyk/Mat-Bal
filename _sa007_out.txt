@@ -1,0 +1,30 @@
+﻿SA007 columns: {0: 'Customer', 1: 'Delivery Place', 2: 'FG Code', 3: 'DO Mat Spec', 4: 'T', 5: 'W', 6: 'L', 7: '1', 8: '2', 9: '3.0', 10: '4.0', 11: '5.0', 12: '1', 13: '2.0', 14: '3.0', 15: '4.0', 16: '5.0', 17: 'nan', 18: 'nan', 19: 'nan', 20: 'nan', 21: 'nan'}
+rows 863
+FG rows 854
+         0         1                  2               3    4    5     6    7    8    9    10    11
+5  AAA MANU  AAA MANU  0.800X110.00XCOIL        SECC-V2X  0.8  110  COIL  NaN  NaN  1.0  NaN   NaN
+6  AAA MANU  AAA MANU  0.800X110.00XCOIL       SECC  V2X  0.8  110  COIL    3    1  4.0  4.0   3.0
+7  AAA MANU  AAA MANU       1.0x113x1219        SECC-F20    1  113  1219  NaN   20  NaN  NaN  50.0
+8  AAA MANU  AAA MANU        1.2x90x1219        SECC-F20  1.2   90  1219  NaN  NaN  NaN  NaN  50.0
+9  AAA MANU  AAA MANU        S-DENSO-058         SPCC-SD  1.2  164  1219   72  NaN  NaN  NaN   NaN
+
+Act order shape (910, 35)
+header months row3 cols 11-28:
+11 2025 Jan
+12 2025 Feb
+13 2025 Mar
+14 2025 Apr
+15 2025 May
+16 2025 Jun
+17 2025 July
+18 2025 Aug
+19 2025 Sep
+20 2025 Oct
+21 2025 Nov
+22 2025 Dec
+23 2026 Jan
+24 2026 Feb
+25 2026 Mar
+26 2026 Apr
+27 2026 May
+28 Summary Total

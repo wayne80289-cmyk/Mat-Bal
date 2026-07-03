@@ -1,0 +1,31 @@
+﻿0 ['Cutting Flag', nan, nan, nan, nan, nan, nan, nan, nan, np.float64(nan), np.float64(nan), np.float64(nan), nan, np.float64(nan), np.float64(nan), np.float64(nan), np.float64(nan), nan, nan, np.float64(nan), nan, nan]
+1 [nan, nan, nan, nan, nan, nan, nan, nan, nan, np.float64(nan), np.float64(nan), np.float64(nan), nan, np.float64(nan), np.float64(nan), np.float64(0.0), np.float64(592.0), nan, nan, np.float64(nan), nan, nan]
+2 [nan, nan, nan, nan, nan, nan, nan, 'Values', 'Month', np.float64(nan), np.float64(nan), np.float64(nan), nan, np.float64(nan), np.float64(nan), np.float64(nan), np.float64(nan), nan, nan, np.float64(nan), nan, nan]
+3 [nan, nan, nan, nan, nan, nan, nan, 'Sum of Qty', nan, np.float64(nan), np.float64(nan), np.float64(nan), 'Sum of Weight', np.float64(nan), np.float64(nan), np.float64(nan), np.float64(nan), 'Total Sum of Qty', 'Total Sum of Weight', np.float64(nan), 'Actual order', 'Forecast']
+4 ['Customer', 'Delivery Place', 'FG Code', 'DO Mat Spec', 'T', 'W', 'L', 1, 2, np.float64(3.0), np.float64(4.0), np.float64(5.0), 1, np.float64(2.0), np.float64(3.0), np.float64(4.0), np.float64(5.0), nan, nan, np.float64(nan), nan, nan]
+5 ['AAA MANU', 'AAA MANU', '0.800X110.00XCOIL', '      SECC-V2X', 0.8, 110, 'COIL', nan, nan, np.float64(1.0), np.float64(nan), np.float64(nan), nan, np.float64(nan), np.float64(160.0), np.float64(nan), np.float64(nan), 1, 160, np.float64(nan), '0.800X110.00XCOIL', nan]
+python : Traceback (most recent call last):
+位於 C:\Users\WEI-TSO\AppData\Local\Temp\ps-script-f0c84200-bdb7-4be8-b03f-50a23eb38629.ps1:90 字元:32
++ cd "c:\Users\WEI-TSO\Mat Bal"; python _sa007_months.py 2>&1 | Out-Fil ...
++                                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Traceback (most recent call last)::String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  File "C:\Users\WEI-TSO\Mat Bal\_sa007_months.py", line 16, in <module>
+    print("May row", r, [raw2.iloc[r, c] for c in range(22)])
+                         ~~~~~~~~~^^^^^^
+  File "C:\Users\WEI-TSO\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\indexing.py", line 1199,
+ in __getitem__
+    return self.obj._get_value(*key, takeable=self._takeable)
+           ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\WEI-TSO\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\frame.py", line 4486, in
+ _get_value
+    series = self._ixs(col, axis=1)
+  File "C:\Users\WEI-TSO\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\frame.py", line 4313, in
+ _ixs
+    col_mgr = self._mgr.iget(i)
+  File "C:\Users\WEI-TSO\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\internals\managers.py", 
+line 1217, in iget
+    block = self.blocks[self.blknos[i]]
+                        ~~~~~~~~~~~^^^
+IndexError: index 20 is out of bounds for axis 0 with size 20
