@@ -31,6 +31,7 @@ from data_loaders import (
 from stock_matching import (
     allocate_ms004_stock,
     allocate_mp008_inbound,
+    build_mat_spec_crosswalk_sheet,
     enrich_material_master,
     inbound_by_material_month,
     load_rules_workbook_sheets,
@@ -74,33 +75,44 @@ class MaterialOrderBalanceSystem:
         if sa006_by_material is not None and not sa006_by_material.empty:
             sa006_map = sa006_by_material.set_index("Material_Code")["Avg_Monthly_Ton"].to_dict()
 
+        client_material_map: dict[tuple[str, str], float] = {}
+        client_fg_map: dict[tuple[str, str], float] = {}
+        if not client_forecast_df.empty and "Material_Code" in client_forecast_df.columns:
+            month_cols = [m for m in target_months if m in client_forecast_df.columns]
+            if month_cols:
+                material_grouped = client_forecast_df.groupby("Material_Code", as_index=False)[month_cols].sum()
+                for _, row in material_grouped.iterrows():
+                    code = str(row["Material_Code"])
+                    for month in month_cols:
+                        client_material_map[(code, month)] = float(row.get(month, 0) or 0)
+                if "FG_Code" in client_forecast_df.columns:
+                    fg_grouped = client_forecast_df.groupby("FG_Code", as_index=False)[month_cols].sum()
+                    for _, row in fg_grouped.iterrows():
+                        code = str(row["FG_Code"])
+                        for month in month_cols:
+                            client_fg_map[(code, month)] = float(row.get(month, 0) or 0)
+
+        history_avg_map: dict[str, float] = {}
+        if not order_history_df.empty:
+            history = order_history_df.copy()
+            history["_Avg_Monthly_Ton"] = history[["M-1", "M-2", "M-3"]].mean(axis=1) / 1000.0
+            history_avg_map = history.drop_duplicates("FG_Code").set_index("FG_Code")["_Avg_Monthly_Ton"].to_dict()
+
         for fg_code in fg_codes:
             if not fg_code or fg_code == "nan":
                 continue
             integrated_forecast[fg_code] = {}
             for month in target_months:
-                client_f = 0.0
-                if (
-                    not client_forecast_df.empty
-                    and "Material_Code" in client_forecast_df.columns
-                    and month in client_forecast_df.columns
-                ):
-                    client_f = client_forecast_df[
-                        client_forecast_df["Material_Code"] == fg_code
-                    ][month].sum()
-                    if client_f == 0 and "FG_Code" in client_forecast_df.columns:
-                        client_f = client_forecast_df[
-                            client_forecast_df["FG_Code"].astype(str) == str(fg_code)
-                        ][month].sum()
+                client_f = client_material_map.get((str(fg_code), month), 0.0)
+                if client_f == 0:
+                    client_f = client_fg_map.get((str(fg_code), month), 0.0)
 
                 calculated_f = 0.0
                 if client_f == 0:
                     if fg_code in sa006_map:
                         calculated_f = float(sa006_map[fg_code] or 0)
-                    elif not order_history_df.empty:
-                        history = order_history_df[order_history_df["FG_Code"] == fg_code]
-                        if not history.empty:
-                            calculated_f = history[["M-1", "M-2", "M-3"]].mean(axis=1).values[0] / 1000.0
+                    elif fg_code in history_avg_map:
+                        calculated_f = float(history_avg_map[fg_code] or 0)
 
                 integrated_forecast[fg_code][month] = client_f + calculated_f
         return integrated_forecast
@@ -125,12 +137,14 @@ class MaterialOrderBalanceSystem:
             so_summary[fg_code][due_month]["Bal_Ton"] += bal_ton
         return so_summary
 
-    def clean_and_allocate_stock(self, ms004_raw_df, rd004_master_df):
+    def clean_and_allocate_stock(self, ms004_raw_df, rd004_master_df, return_unmatched=False):
         """U-Stock rules: PTT + spec/T/W match → allocatable Initial_Stock pool."""
-        return allocate_ms004_stock(ms004_raw_df, rd004_master_df)
+        return allocate_ms004_stock(
+            ms004_raw_df, rd004_master_df, return_unmatched=return_unmatched
+        )
 
     def filter_on_way_po(self, mp008_raw_df, rd004_master_df):
-        """U4: Close Flag=False; Mat Spec match with customer-first allocation."""
+        """U4: unshipped ratio >20% (PO Wt−Received WT); Mat Spec match with customer-first allocation."""
         return allocate_mp008_inbound(mp008_raw_df, rd004_master_df)
 
     def run_material_balance(
@@ -257,6 +271,103 @@ def _spot_urgency(total_backorder: float, first_balance: float, shortfall: float
     return "SAFE", "現貨充足，無需調撥"
 
 
+def _shortage_materials(balance_df: pd.DataFrame, months: list[str]) -> set[str]:
+    """Material codes with SHORTAGE alert in any of the given months."""
+    if balance_df.empty:
+        return set()
+    mats: set[str] = set()
+    for mat, row in balance_df.set_index("Material_Code").iterrows():
+        for m in months:
+            if str(row.get(f"{m}_Alert", "")) == "SHORTAGE":
+                mats.add(str(mat))
+                break
+            # Also catch near-buffer without alert label edge cases
+            if float(row.get(f"{m}_Shortage_Ton", 0) or 0) > 0:
+                mats.add(str(mat))
+                break
+    return mats
+
+
+def _sa007_row_map(sa006_materials: pd.DataFrame) -> dict[str, dict]:
+    if sa006_materials is None or sa006_materials.empty:
+        return {}
+    return {
+        str(r["Material_Code"]): r.to_dict()
+        for _, r in sa006_materials.iterrows()
+        if str(r.get("Material_Code", "")).strip()
+    }
+
+
+def _rd004_row_map(rd004: pd.DataFrame) -> dict[str, dict]:
+    if rd004 is None or rd004.empty:
+        return {}
+    return {
+        str(r["Material_Code"]): r.to_dict()
+        for _, r in rd004.iterrows()
+        if str(r.get("Material_Code", "")).strip()
+    }
+
+
+def _plan_material_codes(
+    balance_df: pd.DataFrame,
+    sa006_materials: pd.DataFrame,
+    months: list[str],
+) -> list[str]:
+    """
+    Plan universe = SA007 recent-sales materials ∪ Balance SHORTAGE in scope months.
+    Ensures codes like JSC270C Special control (no recent SA007) still appear when short.
+    """
+    sa_map = _sa007_row_map(sa006_materials)
+    codes = set(sa_map.keys())
+    codes |= _shortage_materials(balance_df, months)
+    # Stable: SA007 first (by existing order), then shortage-only extras sorted
+    ordered: list[str] = []
+    seen: set[str] = set()
+    if sa006_materials is not None and not sa006_materials.empty:
+        for _, r in sa006_materials.iterrows():
+            m = str(r.get("Material_Code", "")).strip()
+            if m and m not in seen:
+                ordered.append(m)
+                seen.add(m)
+    for m in sorted(codes - seen):
+        ordered.append(m)
+    return ordered
+
+
+def _sa_fields_for_material(
+    mat: str,
+    sa_map: dict[str, dict],
+    rd_map: dict[str, dict],
+    balance_row: dict,
+) -> dict:
+    """SA007 stats when available; else RD004 / Balance fallbacks."""
+    sa = sa_map.get(mat, {})
+    rd = rd_map.get(mat, {})
+    if sa:
+        return {
+            "FG_Code": sa.get("FG_Code", balance_row.get("FG_Code", rd.get("FG_Code", ""))),
+            "Main_Customer": sa.get("Main_Customer", balance_row.get("Main_Customer", rd.get("Main_Customer", ""))),
+            "SA006_客戶": sa.get("Customers", ""),
+            "SA006_M-3_kg": float(sa.get("M-3_kg", 0) or 0),
+            "SA006_M-2_kg": float(sa.get("M-2_kg", 0) or 0),
+            "SA006_M-1_kg": float(sa.get("M-1_kg", 0) or 0),
+            "SA006_近3月合計_kg": float(sa.get("Total_3mo_kg", 0) or 0),
+            "SA006_月均需求_Ton": float(sa.get("Avg_Monthly_Ton", 0) or 0),
+            "資料來源": sa.get("Source_Sheet", "SA006/SA007"),
+        }
+    return {
+        "FG_Code": balance_row.get("FG_Code", rd.get("FG_Code", "")),
+        "Main_Customer": balance_row.get("Main_Customer", rd.get("Main_Customer", "")),
+        "SA006_客戶": "",
+        "SA006_M-3_kg": 0.0,
+        "SA006_M-2_kg": 0.0,
+        "SA006_M-1_kg": 0.0,
+        "SA006_近3月合計_kg": 0.0,
+        "SA006_月均需求_Ton": 0.0,
+        "資料來源": "Balance SHORTAGE（無近3月SA007）",
+    }
+
+
 def build_spot_urgent_plan(
     balance_df: pd.DataFrame,
     so003_df: pd.DataFrame,
@@ -266,20 +377,23 @@ def build_spot_urgent_plan(
     near_months: int = 2,
 ) -> pd.DataFrame:
     """
-    現貨緊急調貨計畫（近 2 月）：以 SA006/SA007 近 3 月銷售為料號清單，
-    套用 U-Stock / SO003 / Carrier 排除後之 Balance 結果，全數列出。
+    現貨緊急調貨計畫（近 2 月）：
+    料號 = SA007 近3月銷售 ∪ Balance 近2月 SHORTAGE（補齊無銷售紀錄但已缺料者）。
     """
-    if sa006_materials.empty:
+    if balance_df.empty and (sa006_materials is None or sa006_materials.empty):
         return pd.DataFrame()
 
     fg_to_mat = build_fg_to_material_map(rd004)
     focus_months = target_months[:near_months]
     focus_label = "、".join(focus_months)
+    sa_map = _sa007_row_map(sa006_materials)
+    rd_map = _rd004_row_map(rd004)
+    materials = _plan_material_codes(balance_df, sa006_materials, focus_months)
     plans = []
 
-    for _, sa in sa006_materials.iterrows():
-        mat = sa["Material_Code"]
+    for mat in materials:
         row = _balance_row(balance_df, mat)
+        sa_fields = _sa_fields_for_material(mat, sa_map, rd_map, row)
         stock = float(row.get("Initial_Stock_Ton", 0) or 0)
         total_backorder = sum(float(row.get(f"{m}_SO_Balance(欠交)", 0) or 0) for m in focus_months)
         total_demand = sum(float(row.get(f"{m}_Effective_Demand", 0) or 0) for m in focus_months)
@@ -287,27 +401,30 @@ def build_spot_urgent_plan(
         last_month = focus_months[-1]
         first_balance = float(row.get(f"{first_month}_Final_Balance", stock) or stock)
         last_balance = float(row.get(f"{last_month}_Final_Balance", stock) or stock)
-        shortfall = max(total_backorder + total_demand - stock, 0)
+        month_shortage = sum(float(row.get(f"{m}_Shortage_Ton", 0) or 0) for m in focus_months)
+        shortfall = max(month_shortage, max(total_backorder + total_demand - stock, 0))
         urgency, action = _spot_urgency(total_backorder, first_balance, shortfall)
+        if month_shortage > 0 and urgency == "SAFE":
+            urgency, action = "MEDIUM", "Balance SHORTAGE：補充現貨至緩衝水位"
 
+        customers = sa_fields["SA006_客戶"]
         mat_so = so003_df.copy()
         if not mat_so.empty and "FG Code" in mat_so.columns:
             mat_so["Mat_Code"] = mat_so["FG Code"].map(lambda x: fg_to_mat.get(x, ""))
             mat_so = mat_so[(mat_so["Mat_Code"] == mat) & (mat_so["Bal Kg"] > 0)]
-            customers = ", ".join(sorted(mat_so["Customer"].unique()[:5]))
-        else:
-            customers = ""
+            if not mat_so.empty:
+                customers = ", ".join(sorted(mat_so["Customer"].astype(str).unique()[:5]))
 
         plans.append({
             "Material_Code": mat,
-            "FG_Code": sa.get("FG_Code", row.get("FG_Code", "")),
-            "Main_Customer": sa.get("Main_Customer", row.get("Main_Customer", "")),
-            "SA006_客戶": sa.get("Customers", customers),
-            "SA006_M-3_kg": round(float(sa.get("M-3_kg", 0) or 0), 1),
-            "SA006_M-2_kg": round(float(sa.get("M-2_kg", 0) or 0), 1),
-            "SA006_M-1_kg": round(float(sa.get("M-1_kg", 0) or 0), 1),
-            "SA006_近3月合計_kg": round(float(sa.get("Total_3mo_kg", 0) or 0), 1),
-            "SA006_月均需求_Ton": round(float(sa.get("Avg_Monthly_Ton", 0) or 0), 3),
+            "FG_Code": sa_fields["FG_Code"],
+            "Main_Customer": sa_fields["Main_Customer"],
+            "SA006_客戶": customers,
+            "SA006_M-3_kg": round(sa_fields["SA006_M-3_kg"], 1),
+            "SA006_M-2_kg": round(sa_fields["SA006_M-2_kg"], 1),
+            "SA006_M-1_kg": round(sa_fields["SA006_M-1_kg"], 1),
+            "SA006_近3月合計_kg": round(sa_fields["SA006_近3月合計_kg"], 1),
+            "SA006_月均需求_Ton": round(sa_fields["SA006_月均需求_Ton"], 3),
             "計畫月份": focus_label,
             "現貨庫存_Ton": round(stock, 3),
             "SO003_欠交_Ton": round(total_backorder, 3),
@@ -316,10 +433,12 @@ def build_spot_urgent_plan(
             "缺口_Ton": round(shortfall, 3),
             "緊急程度": urgency,
             "調貨建議": action,
-            "資料來源": sa.get("Source_Sheet", "SA006/SA007"),
+            "資料來源": sa_fields["資料來源"],
         })
 
     df = pd.DataFrame(plans)
+    if df.empty:
+        return df
     order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "SAFE": 3}
     df["_sort"] = df["緊急程度"].map(order)
     return df.sort_values(["_sort", "缺口_Ton"], ascending=[True, False]).drop(columns="_sort")
@@ -332,26 +451,32 @@ def build_futures_stocking_plan(
     target_months: list[str],
 ) -> pd.DataFrame:
     """
-    期貨備貨計畫（第 3–5 月）：以 SA006/SA007 近 3 月銷售為料號清單全數列出，
+    期貨備貨計畫（第 3–5 月）：
+    料號 = SA007 近3月銷售 ∪ Balance 第3–5月 SHORTAGE；
     含 SHORTAGE 逆推 PO Deadline 與 MOQ 建議量。
     """
-    if sa006_materials.empty:
+    if balance_df.empty and (sa006_materials is None or sa006_materials.empty):
         return pd.DataFrame()
 
     moq_map = rd004.set_index("Material_Code")["MOQ"].to_dict() if "MOQ" in rd004.columns else {}
     future_months = target_months[2:5]
+    sa_map = _sa007_row_map(sa006_materials)
+    rd_map = _rd004_row_map(rd004)
+    materials = _plan_material_codes(balance_df, sa006_materials, future_months)
     plans = []
 
-    for _, sa in sa006_materials.iterrows():
-        mat = sa["Material_Code"]
+    for mat in materials:
         row = _balance_row(balance_df, mat)
+        sa_fields = _sa_fields_for_material(mat, sa_map, rd_map, row)
         moq = float(moq_map.get(mat, 0) or 0)
 
         for month in future_months:
             alert = row.get(f"{month}_Alert", "SAFE")
             shortage = float(row.get(f"{month}_Shortage_Ton", 0) or 0)
             final_balance = float(row.get(f"{month}_Final_Balance", 0) or 0)
-            forecast_ton = float(row.get(f"{month}_Forecast_Ton", sa.get("Avg_Monthly_Ton", 0)) or 0)
+            forecast_ton = float(
+                row.get(f"{month}_Forecast_Ton", sa_fields["SA006_月均需求_Ton"]) or 0
+            )
             so_bal = float(row.get(f"{month}_SO_Balance(欠交)", 0) or 0)
             inbound = float(row.get(f"{month}_Inbound_PO", 0) or 0)
             eff_demand = float(row.get(f"{month}_Effective_Demand", 0) or 0)
@@ -367,17 +492,21 @@ def build_futures_stocking_plan(
             else:
                 order_qty = 0.0
                 plan_type = "無需下單"
-                note = "庫存+在途可滿足 SA006 基準需求"
+                note = "庫存+在途可滿足需求"
+
+            # Skip SAFE/無需下單 rows for shortage-only materials (no SA007) to keep sheet focused
+            if sa_fields["資料來源"].startswith("Balance SHORTAGE") and plan_type == "無需下單":
+                continue
 
             plans.append({
                 "Material_Code": mat,
-                "FG_Code": sa.get("FG_Code", row.get("FG_Code", "")),
-                "Main_Customer": sa.get("Main_Customer", row.get("Main_Customer", "")),
-                "SA006_近3月合計_kg": round(float(sa.get("Total_3mo_kg", 0) or 0), 1),
-                "SA006_月均需求_Ton": round(float(sa.get("Avg_Monthly_Ton", 0) or 0), 3),
+                "FG_Code": sa_fields["FG_Code"],
+                "Main_Customer": sa_fields["Main_Customer"],
+                "SA006_近3月合計_kg": round(sa_fields["SA006_近3月合計_kg"], 1),
+                "SA006_月均需求_Ton": round(sa_fields["SA006_月均需求_Ton"], 3),
                 "需求月份": month,
                 "Forecast_Ton": round(forecast_ton, 3),
-                "SA006_基準需求_Ton": round(float(sa.get("Avg_Monthly_Ton", 0) or 0), 3),
+                "SA006_基準需求_Ton": round(sa_fields["SA006_月均需求_Ton"], 3),
                 "Effective_Demand_Ton": round(eff_demand, 3),
                 "SO003_欠交_Ton": round(so_bal, 3),
                 "在途_PO_Ton": round(inbound, 3),
@@ -389,10 +518,12 @@ def build_futures_stocking_plan(
                 "Alert": alert,
                 "備貨類型": plan_type,
                 "備註": note,
-                "資料來源": sa.get("Source_Sheet", "SA006/SA007"),
+                "資料來源": sa_fields["資料來源"],
             })
 
     df = pd.DataFrame(plans)
+    if df.empty:
+        return df
     return df.sort_values(["PO_Deadline", "需求月份", "缺口_Ton"], ascending=[True, True, False])
 
 
@@ -429,15 +560,27 @@ def run_full_pipeline(target_months: list[str] | None = None) -> pd.DataFrame:
         client_forecast, order_history, target_months, sa006_by_material=sa007_materials
     )
     so_summary = engine.process_so003_orders(so003)
-    cleaned_stock = engine.clean_and_allocate_stock(ms004, rd004)
+    cleaned_stock, unmatched_stock = engine.clean_and_allocate_stock(
+        ms004, rd004, return_unmatched=True
+    )
     active_po = engine.filter_on_way_po(mp008_raw, rd004)
     mp008 = active_po
+    matched_po = active_po
+    if not active_po.empty and "Material_Code" in active_po.columns:
+        matched_po = active_po[active_po["Material_Code"].astype(str).str.strip() != ""].copy()
 
-    print(f"  Open PO rows (allocatable): {len(active_po)}")
+    print(f"  Open PO rows (all / matched): {len(active_po)} / {len(matched_po)}")
     print(f"  Allocatable stock materials: {len(cleaned_stock)}")
+    if not cleaned_stock.empty:
+        print(f"  Allocatable stock ton: {round(float(cleaned_stock['Quantity'].sum()), 1)}")
+    if not unmatched_stock.empty:
+        print(
+            f"  Unmatched PTT stock groups: {len(unmatched_stock)} "
+            f"(ton {round(float(unmatched_stock['Quantity'].sum()), 1)})"
+        )
 
     result = engine.run_material_balance(
-        cleaned_stock, active_po, forecast_map, so_summary, rd004, target_months
+        cleaned_stock, matched_po, forecast_map, so_summary, rd004, target_months
     )
 
     spot_plan = build_spot_urgent_plan(result, so003, rd004, sa007_materials, target_months)
@@ -446,9 +589,20 @@ def run_full_pipeline(target_months: list[str] | None = None) -> pd.DataFrame:
     material_master = enrich_material_master(
         rd004,
         allocatable_stock=cleaned_stock,
-        allocated_po=active_po,
+        allocated_po=matched_po,
     )
     rules_sheets = load_rules_workbook_sheets()
+    rules_sheets["MAT SPEC對照"] = build_mat_spec_crosswalk_sheet(
+        ms004_df=ms004,
+        mp008_df=mp008_raw,
+        unmatched_stock=unmatched_stock,
+        existing_sheet=rules_sheets.get("MAT SPEC對照"),
+        rd004=rd004,
+    )
+    pending_specs = rules_sheets["MAT SPEC對照"]
+    if not pending_specs.empty and "狀態" in pending_specs.columns:
+        n_pending = int((pending_specs["狀態"] == "待手動輸入").sum())
+        print(f"  MAT SPEC對照 待手動輸入: {n_pending} 項")
 
     from rd004_diff import build_rd004_diff_report
 
@@ -469,6 +623,7 @@ def run_full_pipeline(target_months: list[str] | None = None) -> pd.DataFrame:
         so003.to_excel(writer, sheet_name="SO003", index=False)
         mp008.to_excel(writer, sheet_name="MP008", index=False)
         cleaned_stock.to_excel(writer, sheet_name="MS004_Allocatable_Stock", index=False)
+        unmatched_stock.to_excel(writer, sheet_name="MS004_Unmatched", index=False)
         client_forecast.to_excel(writer, sheet_name="Forecast", index=False)
         for sheet_name, sheet_df in forecast_report_sheets.items():
             sheet_df.to_excel(writer, sheet_name=sheet_name[:31], index=False)
@@ -484,8 +639,18 @@ def run_full_pipeline(target_months: list[str] | None = None) -> pd.DataFrame:
 
     print(f"\nReport saved: {out_path}")
     print(f"  Balance materials: {len(result)}")
-    print(f"  現貨緊急調貨 (SA007×近2月): {len(spot_plan)} 項")
-    print(f"  期貨備貨計畫 (SA007×第3-5月): {len(future_plan)} 項")
+    print(f"  現貨緊急調貨 (SA007∪近2月SHORTAGE): {len(spot_plan)} 項")
+    print(f"  期貨備貨計畫 (SA007∪第3-5月SHORTAGE): {len(future_plan)} 項")
+    if not spot_plan.empty and "資料來源" in spot_plan.columns:
+        n_bal_only = int(spot_plan["資料來源"].astype(str).str.startswith("Balance SHORTAGE").sum())
+        if n_bal_only:
+            print(f"    其中僅 Balance SHORTAGE（無SA007）: {n_bal_only} 項")
+    if not future_plan.empty and "資料來源" in future_plan.columns:
+        n_bal_only_f = int(
+            future_plan["資料來源"].astype(str).str.startswith("Balance SHORTAGE").sum()
+        )
+        if n_bal_only_f:
+            print(f"    期貨僅 Balance SHORTAGE 列: {n_bal_only_f} 列")
     from data_loaders import resolve_rd004_master_path
 
     rd004_src = resolve_rd004_master_path()

@@ -69,17 +69,21 @@ RULES_REFERENCE_SHEETS = (
 DEFAULT_SPEC_MAP: dict[str, str] = {
     "SPCC": "SPCC-SD",
     "SPCC-M": "SPCC-SD",
+    "SPCC-4D": "SPCC-SD",
+    "SPCC-SD CQ1 GP": "SPCC-SD",
+    "SPCD": "SPCC-SD",
+    "SPCD-SD": "SPCC-SD",
+    "SPCEN-SD": "SPCC-SD",
     "SGCC-Z08": "SGCC-Z22",
     "SGCD2-Z08": "SGCC-Z22",
     "SGCD1-Z18": "SGCC-Z18",
+    "SGCD1-F08": "SGCD",
     "SAPH440-P/O": "SAPH440-PO",
     "SAPH400-P/O": "SAPH440-P/O",
     "JSH590R-P/O": "SPHC-PO",
     "FC440": "JSC440W",
     "SPFC440": "JSC440W",
     "SECC-AF,E16/E16": "SECC-16/16",
-    "SPCD": "SPCC-SD",
-    "SPCEN-SD": "SPCC-SD",
 }
 
 DEFAULT_PROJECT_CUST_CODES = frozenset({"MING TAI", "MINGTAI"})
@@ -266,11 +270,11 @@ def load_embedded_rules_reference_sheets() -> dict[str, pd.DataFrame]:
         ("U-Stock-04", "MAT SPEC 跨規格", "對照", "實際 MAT SPEC 可與 Code 前綴不同，同 RD004 群組即可（見 MAT SPEC對照表）"),
         ("U-Stock-05", "尾碼 _Common", "尾碼", "跨客戶共通備貨池；同 Code 多列加總進 Balance"),
         ("U-Stock-06", "尾碼 Maker", "尾碼", "依 MAKER CODE 區分，例：_CHINA STEEL、_SSI、_BAOSHAN"),
-        ("U-Stock-07", "尾碼 _CASH", "尾碼", "非標準寬度或現金採購，例：SPHC-P/O_2.6_1086_CASH"),
+        ("U-Stock-07", "尾碼 Customer", "尾碼", "特訂寬度母捲：尾碼用 Customer code（非標準1219），例：SPHC-P/O_2.6_1086_CASH、DC05_0.7_580_C"),
         ("U-Stock-08", "厚度容差", "容差", "0.55→0.5、3.02→3、0.75→0.7；建議 round(T,1) 或依 RD004"),
         ("U-Stock-09", "寬度容差", "容差", "Coil 共通料 Code 常固定 1219；實際 W 1270/1225/1200/1195/1260 可同碼"),
         ("U-Stock-10", "客戶專料", "排除", "專案專購 CUST CODE 特定客戶 → Material Code 留空（約85~90% PTT列）"),
-        ("U-Stock-11", "Allocate 方式", "作業", "手動貼上/向下複製，非公式；約600~800列有 Code（10~15%）"),
+        ("U-Stock-11", "Allocate 方式", "作業", "程式自動配碼（模擬原 Excel 手動貼上）：依客戶專配→Spec/T/W→尾碼優先序選 Material Code；同 Code 再加總（U-Stock-12）"),
         ("U-Stock-12", "同 Code 合併", "加總", "相同 Material Code 之 P REMAIN WT 加總 → Balance 期初現貨（噸）"),
         ("U-Stock-13", "Balance 對應", "對應", "群組型 Code 與 Balance 重疊約88~100%；另有尺寸型命名"),
         ("U-Stock-14", "不納入配對", "排除", "OWNER≠PTT、Code空白、Code=0、REMAIN WT=0 等（見排除清單）"),
@@ -298,16 +302,23 @@ def load_embedded_rules_reference_sheets() -> dict[str, pd.DataFrame]:
             {"步驟": 2, "動作": "檢查 OWNER = PTT？否 → 跳過"},
             {"步驟": 3, "動作": "查 RD004 Common Group（Spec + T [+ W]）"},
             {"步驟": 4, "動作": "是否專案專料（CUST CODE）？是 → Material Code 留空"},
-            {"步驟": 5, "動作": "決定尾碼（Common / Maker / CASH）"},
+            {"步驟": 5, "動作": "決定尾碼（Common / Maker / 特訂寬度用 Customer code）"},
             {"步驟": 6, "動作": "填入 A 欄 Material Code（手動 allocate）"},
             {"步驟": 7, "動作": "同 Code 之 P REMAIN WT 加總 → Balance 表期初現貨"},
         ]),
     }
 
 
+_MATCHING_RULES_CACHE: dict | None = None
+
+
 def load_matching_rules(rules_path: Path | None = None) -> dict:
-    """Load rules from Stock-Material-Code-Matching-Rules.xlsx."""
+    """Load rules from Stock-Material-Code-Matching-Rules.xlsx (cached)."""
+    global _MATCHING_RULES_CACHE
     rules_path = rules_path or resolve_rules_path()
+    if _MATCHING_RULES_CACHE is not None and _MATCHING_RULES_CACHE.get("rules_path") == rules_path:
+        return _MATCHING_RULES_CACHE
+
     spec_map = dict(DEFAULT_SPEC_MAP)
     spec_crosswalk: list[dict] = []
     project_cust = set(DEFAULT_PROJECT_CUST_CODES)
@@ -348,7 +359,7 @@ def load_matching_rules(rules_path: Path | None = None) -> dict:
             for k, v in DEFAULT_SPEC_MAP.items()
         ]
 
-    return {
+    _MATCHING_RULES_CACHE = {
         "spec_map": spec_map,
         "spec_crosswalk": spec_crosswalk,
         "reverse_spec_index": _build_reverse_spec_index(spec_crosswalk),
@@ -356,6 +367,7 @@ def load_matching_rules(rules_path: Path | None = None) -> dict:
         "rules_path": rules_path,
         "rules_path_exists": rules_path_exists,
     }
+    return _MATCHING_RULES_CACHE
 
 
 def load_rules_workbook_sheets(rules_path: Path | None = None) -> dict[str, pd.DataFrame]:
@@ -385,6 +397,218 @@ def load_rules_workbook_sheets(rules_path: Path | None = None) -> dict[str, pd.D
         except Exception:
             pass
     return sheets
+
+
+def build_mat_spec_crosswalk_sheet(
+    ms004_df: pd.DataFrame | None = None,
+    mp008_df: pd.DataFrame | None = None,
+    unmatched_stock: pd.DataFrame | None = None,
+    existing_sheet: pd.DataFrame | None = None,
+    rd004: pd.DataFrame | None = None,
+    rules: dict | None = None,
+) -> pd.DataFrame:
+    """
+    MAT SPEC對照 for Supply Plan: known mappings + SPECs with no Code yet
+    (empty 配對_Code前綴) so the user can fill them in manually.
+    """
+    rules = rules or load_matching_rules()
+    raw_map: dict[str, str] = dict(rules.get("spec_map") or DEFAULT_SPEC_MAP)
+    # Normalized key → Code前綴
+    spec_map: dict[str, str] = {_norm_spec(k): _text(v) for k, v in raw_map.items() if _norm_spec(k)}
+
+    # RD004 identity keys (Spec / Common_Group / Material_Code prefix)
+    rd004_keys: dict[str, str] = {}
+    if rd004 is not None and not rd004.empty:
+        for _, m in rd004.iterrows():
+            for field in ("Spec", "Common_Group", "Material_Code"):
+                val = _text(m.get(field, ""))
+                if not val:
+                    continue
+                nk = _norm_spec(val)
+                if nk and nk not in rd004_keys:
+                    rd004_keys[nk] = val
+                # Format-A group prefix before first _digit
+                parts = parse_material_code_parts(val)
+                grp = _text(parts.get("Parsed_Common_Group", ""))
+                if grp:
+                    gk = _norm_spec(grp)
+                    if gk and gk not in rd004_keys:
+                        rd004_keys[gk] = grp
+
+    def _auto_code_for(spec_key: str, display_spec: str) -> tuple[str, str]:
+        """Return (code_prefix, note) when auto-resolvable."""
+        if spec_key in spec_map and spec_map[spec_key]:
+            return spec_map[spec_key], ""
+        if spec_key in rd004_keys:
+            return rd004_keys[spec_key], "同 RD004 規格／群組"
+        # mapped target lands on RD004
+        mapped = spec_map.get(spec_key, "")
+        if mapped:
+            mk = _norm_spec(mapped)
+            if mk in rd004_keys:
+                return mapped, ""
+        # fuzzy: compact compare against RD004 keys
+        compact = _compact_spec(display_spec)
+        if compact:
+            for rk, rv in rd004_keys.items():
+                if _compact_spec(rk) == compact or _compact_spec(rv) == compact:
+                    return rv, "同 RD004（正規化）"
+        return "", ""
+
+    # Seed from existing Rules sheet / defaults
+    rows_by_key: dict[str, dict] = {}
+    sources: list[pd.DataFrame] = []
+    if existing_sheet is not None and not existing_sheet.empty:
+        sources.append(existing_sheet)
+    else:
+        sources.append(pd.DataFrame([
+            {"MS004_MAT_SPEC": k, "配對_Code前綴": v, "備註": ""}
+            for k, v in DEFAULT_SPEC_MAP.items()
+        ]))
+
+    for src in sources:
+        for _, r in src.iterrows():
+            ms = _text(r.get("MS004_MAT_SPEC", r.get("MAT SPEC", "")))
+            if not ms:
+                continue
+            key = _norm_spec(ms)
+            code = _text(r.get("配對_Code前綴", r.get("Code前綴", "")))
+            note = _text(r.get("備註", ""))
+            if not code:
+                code, auto_note = _auto_code_for(key, ms)
+                if auto_note and not note:
+                    note = auto_note
+            if key not in rows_by_key:
+                rows_by_key[key] = {
+                    "MS004_MAT_SPEC": ms,
+                    "配對_Code前綴": code,
+                    "狀態": "已對照" if code else "待手動輸入",
+                    "備註": note,
+                    "PTT列數": 0,
+                    "PTT噸": 0.0,
+                    "MP008列數": 0,
+                    "來源": "規則表",
+                }
+            else:
+                if code and not rows_by_key[key]["配對_Code前綴"]:
+                    rows_by_key[key]["配對_Code前綴"] = code
+                    rows_by_key[key]["狀態"] = "已對照"
+                if note and not rows_by_key[key]["備註"]:
+                    rows_by_key[key]["備註"] = note
+
+    # Ensure every DEFAULT / rules spec_map entry appears
+    for ms_key, code in spec_map.items():
+        if not ms_key:
+            continue
+        if ms_key not in rows_by_key:
+            rows_by_key[ms_key] = {
+                "MS004_MAT_SPEC": ms_key,
+                "配對_Code前綴": code,
+                "狀態": "已對照" if code else "待手動輸入",
+                "備註": "",
+                "PTT列數": 0,
+                "PTT噸": 0.0,
+                "MP008列數": 0,
+                "來源": "規則表",
+            }
+        elif code and not rows_by_key[ms_key]["配對_Code前綴"]:
+            rows_by_key[ms_key]["配對_Code前綴"] = code
+            rows_by_key[ms_key]["狀態"] = "已對照"
+
+    def _ensure_spec(spec: str, source: str) -> dict | None:
+        ms = _text(spec)
+        if not ms:
+            return None
+        key = _norm_spec(ms)
+        if key not in rows_by_key:
+            code, note = _auto_code_for(key, ms)
+            rows_by_key[key] = {
+                "MS004_MAT_SPEC": ms,
+                "配對_Code前綴": code,
+                "狀態": "已對照" if code else "待手動輸入",
+                "備註": note if code else "請手動填入配對_Code前綴",
+                "PTT列數": 0,
+                "PTT噸": 0.0,
+                "MP008列數": 0,
+                "來源": source,
+            }
+        else:
+            # fill blank code from RD004 identity if possible
+            if not rows_by_key[key]["配對_Code前綴"]:
+                code, note = _auto_code_for(key, ms)
+                if code:
+                    rows_by_key[key]["配對_Code前綴"] = code
+                    rows_by_key[key]["狀態"] = "已對照"
+                    if note and not rows_by_key[key]["備註"]:
+                        rows_by_key[key]["備註"] = note
+            src = rows_by_key[key]["來源"]
+            if source and source not in str(src):
+                rows_by_key[key]["來源"] = f"{src}+{source}" if src else source
+        return rows_by_key[key]
+
+    # MS004 PTT specs
+    if ms004_df is not None and not ms004_df.empty:
+        spec_col = "Spec" if "Spec" in ms004_df.columns else (
+            "MAT SPEC" if "MAT SPEC" in ms004_df.columns else None
+        )
+        if spec_col:
+            for _, row in ms004_df.iterrows():
+                rec = _ensure_spec(row.get(spec_col, ""), "MS004")
+                if not rec:
+                    continue
+                rec["PTT列數"] = int(rec["PTT列數"]) + 1
+                qty = _ms004_row_weight_ton(row) if (
+                    "P REMAIN WT" in row.index or "Quantity" in row.index
+                ) else _num(row.get("Quantity", 0))
+                rec["PTT噸"] = round(float(rec["PTT噸"]) + qty, 6)
+
+    # MP008 open specs
+    if mp008_df is not None and not mp008_df.empty:
+        spec_col = "Mat Spec" if "Mat Spec" in mp008_df.columns else (
+            "MAT SPEC" if "MAT SPEC" in mp008_df.columns else None
+        )
+        if spec_col:
+            for _, row in mp008_df.iterrows():
+                rec = _ensure_spec(row.get(spec_col, ""), "MP008")
+                if not rec:
+                    continue
+                rec["MP008列數"] = int(rec["MP008列數"]) + 1
+
+    # Unmatched stock — keep as 待手動輸入 when still no code
+    if unmatched_stock is not None and not unmatched_stock.empty:
+        for _, row in unmatched_stock.iterrows():
+            rec = _ensure_spec(row.get("Mat_Spec", row.get("Spec", "")), "Unmatched")
+            if not rec:
+                continue
+            if not rec["配對_Code前綴"]:
+                rec["狀態"] = "待手動輸入"
+                if not rec["備註"] or "同 RD004" in str(rec["備註"]):
+                    rec["備註"] = "本期 MS004 未配到 Material Code，請填 Code 前綴"
+            qty = _num(row.get("Quantity", 0))
+            if "Unmatched" in str(rec["來源"]) and float(rec["PTT噸"]) == 0:
+                rec["PTT噸"] = round(qty, 6)
+
+    out_rows = list(rows_by_key.values())
+    for rec in out_rows:
+        if not rec["配對_Code前綴"]:
+            rec["狀態"] = "待手動輸入"
+            if not rec["備註"]:
+                rec["備註"] = "請手動填入配對_Code前綴"
+        rec["PTT噸"] = round(float(rec["PTT噸"]), 3)
+
+    out = pd.DataFrame(out_rows)
+    if out.empty:
+        return pd.DataFrame(columns=[
+            "MS004_MAT_SPEC", "配對_Code前綴", "狀態", "備註",
+            "PTT列數", "PTT噸", "MP008列數", "來源",
+        ])
+
+    out["_pending"] = (out["狀態"] != "已對照").astype(int)
+    out = out.sort_values(
+        by=["_pending", "PTT噸", "MS004_MAT_SPEC"],
+        ascending=[False, False, True],
+    ).drop(columns=["_pending"])
+    return out.reset_index(drop=True)
 
 
 def parse_material_code_parts(material_code: str) -> dict:
@@ -428,13 +652,17 @@ def parse_material_code_parts(material_code: str) -> dict:
     }
 
 
-def classify_pool_type(code_suffix: str) -> tuple[str, str]:
-    """Return (Pool_Type, Stock_Rule_Ref) from code tail."""
+def classify_pool_type(code_suffix: str, parsed_width: float | None = None) -> tuple[str, str]:
+    """Return (Pool_Type, Stock_Rule_Ref) from code tail (+ optional width)."""
     suffix = _norm_spec(code_suffix).upper().replace(" ", "")
     if suffix == "COMMON" or suffix.endswith("COMMON"):
         return "共通池", "U-Stock-05"
+    # U-Stock-07: special-width mother coil → suffix is Customer code (incl. CASH)
+    special_w = parsed_width is not None and parsed_width > 0 and round(parsed_width, 0) != 1219
+    if special_w and suffix:
+        return "特訂寬度(Customer)", "U-Stock-07"
     if "CASH" in suffix:
-        return "現金採購", "U-Stock-07"
+        return "特訂寬度(Customer)", "U-Stock-07"
     if suffix:
         return "Maker", "U-Stock-06"
     return "其他", "U-Stock-03"
@@ -521,7 +749,9 @@ def enrich_material_master(
         main_customer = _text(rec.get("Main_Customer", ""))
 
         parts = parse_material_code_parts(code)
-        pool_type, suffix_rule = classify_pool_type(parts["Code_Suffix"])
+        pool_type, suffix_rule = classify_pool_type(
+            parts["Code_Suffix"], parts.get("Parsed_W")
+        )
         ms004_specs, ms004_notes = ms004_specs_for_material(spec, common_group, rules)
 
         rule_refs = ["U-Stock-02", "U-Stock-03", "U-Stock-08", suffix_rule, "U-Stock-12"]
@@ -710,16 +940,28 @@ def _append_coil_split_records(
         records.append(rec)
 
 
+_CUSTOMER_SPEC_PAIRINGS_CACHE: dict | None = None
+
+
 def load_customer_spec_pairings(rules_path: Path | None = None) -> list[dict]:
     """Load exclusive customer/spec pairings from rules workbook or defaults."""
-    pairings = [dict(p) for p in DEFAULT_CUSTOMER_SPEC_PAIRINGS]
+    global _CUSTOMER_SPEC_PAIRINGS_CACHE
     rules_path = rules_path or resolve_rules_path()
+    if (
+        _CUSTOMER_SPEC_PAIRINGS_CACHE is not None
+        and _CUSTOMER_SPEC_PAIRINGS_CACHE.get("rules_path") == rules_path
+    ):
+        return _CUSTOMER_SPEC_PAIRINGS_CACHE["pairings"]
+
+    pairings = [dict(p) for p in DEFAULT_CUSTOMER_SPEC_PAIRINGS]
     if not rules_path.exists():
+        _CUSTOMER_SPEC_PAIRINGS_CACHE = {"rules_path": rules_path, "pairings": pairings}
         return pairings
     try:
         xl = pd.ExcelFile(rules_path)
         sheet = next((s for s in xl.sheet_names if "客戶專屬" in s or "專屬配對" in s), None)
         if not sheet:
+            _CUSTOMER_SPEC_PAIRINGS_CACHE = {"rules_path": rules_path, "pairings": pairings}
             return pairings
         df = pd.read_excel(rules_path, sheet_name=sheet)
         loaded: list[dict] = []
@@ -750,8 +992,11 @@ def load_customer_spec_pairings(rules_path: Path | None = None) -> list[dict]:
                 "common_group": _text(row.get("Common_Group", spec)),
                 "note": _text(row.get("備註", "")),
             })
-        return loaded if loaded else pairings
+        result = loaded if loaded else pairings
+        _CUSTOMER_SPEC_PAIRINGS_CACHE = {"rules_path": rules_path, "pairings": result}
+        return result
     except Exception:
+        _CUSTOMER_SPEC_PAIRINGS_CACHE = {"rules_path": rules_path, "pairings": pairings}
         return pairings
 
 
@@ -939,6 +1184,20 @@ def is_common_material_code(material_code: str) -> bool:
     return "_COMMON" in _norm_spec(material_code).upper()
 
 
+def rd004_match_width(m: pd.Series) -> float:
+    """
+    Width used for U-Stock-09 stock/PO matching.
+    Format-A Material Codes with Parsed_W=1219 are mother-coil commons: match on 1219
+    even when the Excel Width cell holds a finished-product strip width.
+    """
+    code = _text(m.get("Material_Code", ""))
+    parts = parse_material_code_parts(code)
+    parsed_w = parts.get("Parsed_W")
+    if parsed_w is not None and round(float(parsed_w), 0) == 1219:
+        return 1219.0
+    return _num(m.get("Width"))
+
+
 def find_rd004_matches(
     mat_spec: str,
     thickness: float,
@@ -949,11 +1208,12 @@ def find_rd004_matches(
     rules = rules or load_matching_rules()
     hits = []
     for _, m in rd004.iterrows():
-        if not spec_group_matches(mat_spec, m.get("Spec", m.get("Common_Group", "")), rules):
+        # Spec column is often blank; match Spec / Common_Group / Material_Code
+        if not material_row_matches_spec(mat_spec, m, rules):
             continue
         if not thickness_matches(thickness, _num(m.get("Thickness"))):
             continue
-        if not width_matches(width, _num(m.get("Width"))):
+        if not width_matches(width, rd004_match_width(m)):
             continue
         hits.append(m)
     if not hits:
@@ -987,32 +1247,73 @@ def _ms004_row_weight_ton(row: pd.Series) -> float:
     return _num(row.get("Quantity", 0))
 
 
-def allocate_ms004_stock(ms004_df: pd.DataFrame, rd004: pd.DataFrame, rules: dict | None = None) -> pd.DataFrame:
+def allocate_ms004_stock(
+    ms004_df: pd.DataFrame,
+    rd004: pd.DataFrame,
+    rules: dict | None = None,
+    *,
+    return_unmatched: bool = False,
+):
     """
     Build allocatable spot stock per U-Stock rules.
-    Returns detail rows + aggregated Quantity per Material_Code.
+    Returns aggregated Quantity per Material_Code.
+    If return_unmatched=True, returns (summary, unmatched_df).
     """
     rules = rules or load_matching_rules()
+    empty_summary = pd.DataFrame(columns=[
+        "Material_Code", "Common_Group", "Quantity", "Mat_Spec", "T", "W",
+        "CUST_CODE", "Allocatable", "Match_Rule",
+    ])
+    empty_unmatched = pd.DataFrame(columns=[
+        "Mat_Spec", "T", "W", "Quantity", "CUST_CODE", "MAKER_CODE", "Reason",
+    ])
     if ms004_df.empty:
-        return pd.DataFrame(columns=[
-            "Material_Code", "Common_Group", "Quantity", "Mat_Spec", "T", "W",
-            "CUST_CODE", "Allocatable", "Match_Rule",
-        ])
+        return (empty_summary, empty_unmatched) if return_unmatched else empty_summary
 
-    records = []
+    pairings = load_customer_spec_pairings()
+    work_rows = []
     for _, row in ms004_df.iterrows():
         if not is_allocatable_ms004_row(row, rules):
             continue
-
-        spec = _text(row.get("Spec", row.get("MAT SPEC", "")))
-        t = _num(row.get("Thickness", row.get("T")))
-        w = _num(row.get("Width", row.get("W")))
         qty_ton = _ms004_row_weight_ton(row)
         if qty_ton <= 0:
             continue
+        work_rows.append({
+            "Spec": _text(row.get("Spec", row.get("MAT SPEC", ""))),
+            "Thickness": _num(row.get("Thickness", row.get("T"))),
+            "Width": _num(row.get("Width", row.get("W"))),
+            "Quantity": qty_ton,
+            "CUST_CODE": _text(row.get("CUST CODE", row.get("Cust Code", ""))),
+            "MAKER_CODE": _text(row.get("MAKER CODE", row.get("Maker Code", ""))),
+        })
+    if not work_rows:
+        return (empty_summary, empty_unmatched) if return_unmatched else empty_summary
 
-        cust_code = _text(row.get("CUST CODE", row.get("Cust Code", "")))
-        exclusive = resolve_customer_spec_pairing(spec, t, w, rd004, "", cust_code)
+    work_df = (
+        pd.DataFrame(work_rows)
+        .groupby(["Spec", "Thickness", "Width", "CUST_CODE", "MAKER_CODE"], as_index=False, dropna=False)["Quantity"]
+        .sum()
+    )
+
+    records = []
+    unmatched = []
+    for _, row in work_df.iterrows():
+        spec = _text(row["Spec"])
+        t = _num(row["Thickness"])
+        w = _num(row["Width"])
+        qty_ton = _num(row["Quantity"])
+        cust_code = _text(row["CUST_CODE"])
+        maker_code = _text(row["MAKER_CODE"])
+        exclusive = resolve_customer_spec_pairing(
+            spec,
+            t,
+            w,
+            rd004,
+            "",
+            cust_code,
+            pairings=pairings,
+            rules=rules,
+        )
         if exclusive:
             records.append({
                 "Material_Code": exclusive["material_code"],
@@ -1022,7 +1323,7 @@ def allocate_ms004_stock(ms004_df: pd.DataFrame, rd004: pd.DataFrame, rules: dic
                 "T": t,
                 "W": w,
                 "CUST_CODE": cust_code,
-                "MAKER_CODE": _text(row.get("MAKER CODE", row.get("Maker Code", ""))),
+                "MAKER_CODE": maker_code,
                 "Allocatable": True,
                 "Match_Rule": "Customer-Spec-Pair",
                 "Product_W": exclusive.get("product_width"),
@@ -1035,6 +1336,7 @@ def allocate_ms004_stock(ms004_df: pd.DataFrame, rd004: pd.DataFrame, rules: dic
                 matches,
                 row.get("CUST CODE", row.get("Cust Code", "")),
                 row.get("MAKER CODE", row.get("Maker Code", "")),
+                stock_width=w,
             )
             if mat_code:
                 hit = matches[matches["Material_Code"] == mat_code].iloc[0]
@@ -1045,10 +1347,13 @@ def allocate_ms004_stock(ms004_df: pd.DataFrame, rd004: pd.DataFrame, rules: dic
                     "Mat_Spec": spec,
                     "T": t,
                     "W": w,
-                    "CUST_CODE": _text(row.get("CUST CODE", row.get("Cust Code", ""))),
-                    "MAKER_CODE": _text(row.get("MAKER CODE", row.get("Maker Code", ""))),
+                    "CUST_CODE": cust_code,
+                    "MAKER_CODE": maker_code,
                     "Allocatable": True,
-                    "Match_Rule": "U-Stock-03",
+                    "Match_Rule": "U-Stock-07" if (
+                        w > 0 and round(w, 0) != 1219
+                        and not is_common_material_code(mat_code)
+                    ) else "U-Stock-03",
                 })
             continue
 
@@ -1068,40 +1373,73 @@ def allocate_ms004_stock(ms004_df: pd.DataFrame, rd004: pd.DataFrame, rules: dic
                 qty_ton,
                 split_targets,
                 match_rule=split_rule,
-                cust_code=_text(row.get("CUST CODE", row.get("Cust Code", ""))),
-                maker_code=_text(row.get("MAKER CODE", row.get("Maker Code", ""))),
+                cust_code=cust_code,
+                maker_code=maker_code,
             )
             continue
 
-    if not records:
-        return pd.DataFrame(columns=[
-            "Material_Code", "Common_Group", "Quantity", "Mat_Spec", "T", "W",
-            "CUST_CODE", "Allocatable", "Match_Rule",
-        ])
+        unmatched.append({
+            "Mat_Spec": spec,
+            "T": t,
+            "W": w,
+            "Quantity": round(qty_ton, 6),
+            "CUST_CODE": cust_code,
+            "MAKER_CODE": maker_code,
+            "Reason": "No RD004 Spec/T/W match",
+        })
 
-    detail = pd.DataFrame(records)
-    # U-Stock-12: same Material Code sum weight
-    summary = (
-        detail.groupby(["Material_Code", "Common_Group"], as_index=False)["Quantity"]
-        .sum()
-        .round(6)
-    )
-    summary["Allocatable"] = True
-    summary["Match_Rule"] = "U-Stock-12"
+    unmatched_df = pd.DataFrame(unmatched) if unmatched else empty_unmatched
+    if not unmatched_df.empty:
+        unmatched_df = (
+            unmatched_df.groupby(
+                ["Mat_Spec", "T", "W", "CUST_CODE", "MAKER_CODE", "Reason"],
+                as_index=False,
+            )["Quantity"]
+            .sum()
+            .round(6)
+            .sort_values("Quantity", ascending=False)
+        )
+
+    if not records:
+        summary = empty_summary
+    else:
+        detail = pd.DataFrame(records)
+        # U-Stock-12: same Material Code sum weight
+        summary = (
+            detail.groupby(["Material_Code", "Common_Group"], as_index=False)["Quantity"]
+            .sum()
+            .round(6)
+        )
+        summary["Allocatable"] = True
+        summary["Match_Rule"] = "U-Stock-12"
+
+    if return_unmatched:
+        return summary, unmatched_df
     return summary
 
 
 def filter_open_mp008(mp008_df: pd.DataFrame) -> pd.DataFrame:
-    """U4: Close Flag=False / not received."""
+    """
+    U4: keep in-transit PO lines for Inbound.
+    Primary: Unshipped_Ratio > 20% (PO Wt − Received WT) / PO Wt.
+    Fallback: Quantity > 0 when ratio columns absent.
+    """
     if mp008_df.empty:
         return mp008_df
     out = mp008_df.copy()
-    if "Close Flag" in out.columns:
-        out = out[out["Close Flag"].astype(str).str.upper().isin(["FALSE", "0", "", "NAN"]) | out["Close Flag"].isna()]
+    if "Unshipped_Ratio" in out.columns:
+        out = out[_num_series(out["Unshipped_Ratio"]) > 0.20]
+    elif "PO Balance WT" in out.columns:
+        if "Close Flag" in out.columns:
+            out = out[
+                out["Close Flag"].astype(str).str.upper().isin(["FALSE", "0", "", "NAN"])
+                | out["Close Flag"].isna()
+            ]
+        out = out[_num_series(out["PO Balance WT"]) > 0]
     if "Status" in out.columns:
         out = out[out["Status"].astype(str).str.upper() != "RECEIVED"]
-    if "PO Balance WT" in out.columns:
-        out = out[_num_series(out["PO Balance WT"]) > 0]
+    if "Quantity" in out.columns:
+        out = out[_num_series(out["Quantity"]) > 0]
     return out
 
 
@@ -1113,8 +1451,13 @@ def _pick_material_for_stock(
     candidates: pd.DataFrame,
     cust_code: str,
     maker_code: str,
+    stock_width: float | None = None,
 ) -> str:
-    """One MS004 row → one Material Code (manual allocate behaviour)."""
+    """
+    One MS004 row → one Material Code (manual allocate behaviour).
+    Priority: Main_Customer match → U-Stock-07 special-width Customer suffix
+    → Common pool → Maker in code → first candidate.
+    """
     if candidates.empty:
         return ""
     cust = _text(cust_code)
@@ -1122,6 +1465,30 @@ def _pick_material_for_stock(
         for _, m in candidates.iterrows():
             if customer_matches(cust, m.get("Main_Customer", "")):
                 return m["Material_Code"]
+            # U-Stock-07: special-width mother coil suffix = Customer code
+            parts = parse_material_code_parts(m.get("Material_Code", ""))
+            suffix = _text(parts.get("Code_Suffix", ""))
+            if suffix and customer_matches(cust, suffix):
+                return m["Material_Code"]
+
+    special_w = (
+        stock_width is not None
+        and stock_width > 0
+        and round(stock_width, 0) != 1219
+    )
+    if special_w:
+        # Prefer non-Common codes whose Parsed_W matches the special mother-coil width
+        for _, m in candidates.iterrows():
+            parts = parse_material_code_parts(m.get("Material_Code", ""))
+            parsed_w = parts.get("Parsed_W")
+            suffix = _norm_spec(parts.get("Code_Suffix", ""))
+            if not parsed_w or round(float(parsed_w), 0) == 1219:
+                continue
+            if suffix.endswith("COMMON") or suffix == "COMMON":
+                continue
+            if round(float(parsed_w), 0) == round(stock_width, 0):
+                return m["Material_Code"]
+
     common = candidates[candidates["Material_Code"].map(is_common_material_code)]
     if not common.empty:
         return common.iloc[0]["Material_Code"]
@@ -1296,6 +1663,11 @@ def _mp008_alloc_row(row: pd.Series, mat_code: str, qty_ton: float, priority: st
         "Quantity": round(qty_ton, 6),
         "Alloc_Priority": priority,
         "Close Flag": row.get("Close Flag", False),
+        "PO Wt": _num(row.get("PO Wt", 0)),
+        "Received WT": _num(row.get("Received WT", 0)),
+        "Unshipped WT": _num(row.get("Unshipped WT", qty_ton * 1000)),
+        "Unshipped_Ratio": _num(row.get("Unshipped_Ratio", 0)),
+        "Inbound_Reason": _text(row.get("Inbound_Reason", "")),
         "PO Balance WT": _num(row.get("PO Balance WT", qty_ton * 1000)),
     }
     base.update(extra)
@@ -1400,6 +1772,9 @@ def allocate_mp008_inbound(
                     Product_W_Sum=sum(pw * r for _, pw, r in split_targets),
                 ))
             continue
+
+        # Keep unmatched open PO visible in report (not used in Balance inbound)
+        rows.append(_mp008_alloc_row(row, "", qty_ton, "Unmatched"))
 
     if not rows:
         return pd.DataFrame(columns=[
