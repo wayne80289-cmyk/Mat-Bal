@@ -590,7 +590,15 @@ def load_mp008(sample_path: Path | None = None) -> pd.DataFrame:
     return exclude_carrier_rows(df)
 
 
+MP008_UNSHIPPED_RATIO_THRESHOLD = 0.20  # U4: (PO Wt − Received WT) / PO Wt > 20% → 計入在途 Inbound
+
+
 def _parse_mp008_raw(raw: pd.DataFrame, source: str) -> pd.DataFrame:
+    """
+    U4 MP008 open / in-transit PO lines.
+    Inbound qty = max(PO Wt − Received WT, 0) when unshipped ratio > 20%
+    (steel-mill futures not yet fully shipped to PTT), booked to ETA month.
+    """
     hdr = _detect_header_row(raw, ("po no.", "mat spec", "eta date", "close flag"))
     col_map: dict[str, int] = {}
     for i, h in enumerate(raw.iloc[hdr].tolist()):
@@ -607,24 +615,53 @@ def _parse_mp008_raw(raw: pd.DataFrame, source: str) -> pd.DataFrame:
             col_map["ETA"] = i
         elif key == "close flag":
             col_map["Close Flag"] = i
+        elif key in ("po wt", "po weight") or (key.startswith("po") and "wt" in key and "balance" not in key and "qty" not in key):
+            col_map.setdefault("PO Wt", i)
+        elif "received wt" in key or key == "received wt":
+            col_map["Received WT"] = i
         elif "po balance wt" in key or key == "po balance wt":
             col_map["PO Balance WT"] = i
+        elif "po delivery date" in key:
+            col_map["PO Delivery Date"] = i
         elif key == "customer":
             col_map["Customer"] = i
 
     rows = []
     for i in range(hdr + 1, len(raw)):
-        if col_map.get("Close Flag") is not None and raw.iloc[i, col_map["Close Flag"]] is True:
-            continue
         eta = raw.iloc[i, col_map.get("ETA", 17)] if "ETA" in col_map else None
-        if pd.isna(eta):
-            continue
         eta_dt = pd.to_datetime(eta, errors="coerce")
-        if pd.isna(eta_dt):
+        # Invalid Excel placeholder (1900-01-01): fall back to PO Delivery Date
+        if pd.isna(eta_dt) or getattr(eta_dt, "year", 0) < 2000:
+            if "PO Delivery Date" in col_map:
+                eta_dt = pd.to_datetime(raw.iloc[i, col_map["PO Delivery Date"]], errors="coerce")
+        if pd.isna(eta_dt) or getattr(eta_dt, "year", 0) < 2000:
             continue
-        bal_wt = _num(raw.iloc[i, col_map.get("PO Balance WT", 24)])
-        if bal_wt <= 0:
+
+        po_wt = _num(raw.iloc[i, col_map["PO Wt"]]) if "PO Wt" in col_map else 0.0
+        received_wt = _num(raw.iloc[i, col_map["Received WT"]]) if "Received WT" in col_map else 0.0
+        bal_wt = _num(raw.iloc[i, col_map["PO Balance WT"]]) if "PO Balance WT" in col_map else 0.0
+        unshipped_wt = max(po_wt - received_wt, 0.0)
+        unshipped_ratio = (unshipped_wt / po_wt) if po_wt > 0 else 0.0
+
+        # Primary U4 rule: unshipped share of PO Wt > 20%
+        if po_wt > 0 and unshipped_ratio > MP008_UNSHIPPED_RATIO_THRESHOLD:
+            inbound_wt = unshipped_wt
+            inbound_reason = f"Unshipped>{MP008_UNSHIPPED_RATIO_THRESHOLD:.0%}"
+        # Fallback when PO Wt / Received WT missing: legacy open balance
+        elif po_wt <= 0 and bal_wt > 0:
+            close_flag = raw.iloc[i, col_map["Close Flag"]] if "Close Flag" in col_map else False
+            if close_flag is True:
+                continue
+            inbound_wt = bal_wt
+            inbound_reason = "PO Balance WT"
+            unshipped_wt = bal_wt
+            unshipped_ratio = 1.0 if bal_wt > 0 else 0.0
+        else:
             continue
+
+        if inbound_wt <= 0:
+            continue
+
         close_flag = raw.iloc[i, col_map["Close Flag"]] if "Close Flag" in col_map else False
         rows.append({
             "Po No.": _text(raw.iloc[i, col_map.get("Po No.", 0)]),
@@ -634,9 +671,15 @@ def _parse_mp008_raw(raw: pd.DataFrame, source: str) -> pd.DataFrame:
             "W": _num(raw.iloc[i, col_map.get("W", 12)]),
             "ETA": eta_dt,
             "ETA_Month": eta_dt.strftime("%Y-%m"),
-            "PO Balance WT": bal_wt,
+            "PO Wt": po_wt,
+            "Received WT": received_wt,
+            "Unshipped WT": unshipped_wt,
+            "Unshipped_Ratio": round(unshipped_ratio, 4),
+            "PO Balance WT": bal_wt if bal_wt > 0 else unshipped_wt,
+            "Quantity": inbound_wt / 1000.0,
+            "Inbound_Reason": inbound_reason,
             "Close Flag": close_flag,
-            "Status": "Open",
+            "Status": "In-Transit",
             "Source": source,
         })
     return pd.DataFrame(rows)
@@ -1200,14 +1243,16 @@ def aggregate_sa006_by_material(sa006_df: pd.DataFrame, rd004: pd.DataFrame) -> 
         fg = _text(row["FG_Code"])
         code = fg_to_mat.get(fg, "")
         if not code:
-            code = resolve_customer_spec_pairing(
+            pairing = resolve_customer_spec_pairing(
                 row.get("Spec", ""),
                 row.get("Thickness", 0),
                 row.get("Width", 0),
                 rd004,
                 fg,
                 row.get("Customer", ""),
-            ) or ""
+            )
+            if pairing:
+                code = _text(pairing.get("material_code", ""))
         if not code:
             hits = find_rd004_matches(
                 row.get("Spec", ""),
